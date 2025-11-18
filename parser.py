@@ -8,36 +8,29 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://student.lpnu.ua"
 
-def get_day_from_string(line):
+def get_standard_day_name(line):
     """
-    Визначає день тижня, перевіряючи всі можливі варіанти написання 
-    (Кирилиця, Латиниця, Змішані).
+    Перетворює будь-який варіант написання дня у стандартний ключ.
+    Наприклад: "пн", "Mon", "Понеділок." -> "Понеділок"
     """
-    # Видаляємо все зайве (крапки, пробіли) і переводимо в нижній регістр
+    # Видаляємо все зайве і переводимо в нижній регістр
     clean_line = re.sub(r'[^\w]', '', line).lower() 
     
-    # Словник усіх можливих варіантів (ukr + eng visual lookalikes)
+    # Карта відповідності
     days_map = {
         "Понеділок": ["пн", "пон", "mon"],
-        
-        # Вт: В=B, т=t (може бути 'bt', 'вt', 'bт'...)
         "Вівторок":  ["вт", "вів", "bt", "biв", "vt", "tue"],
-        
-        # Ср: С=C, р=p (може бути 'cp', 'сp', 'cр'...)
         "Середа":    ["ср", "сер", "cp", "cep", "wed"],
-        
         "Четвер":    ["чт", "чет", "thu"],
         "П'ятниця":  ["пт", "пят", "fri"],
         "Субота":    ["сб", "суб", "sat"],
         "Неділя":    ["нд", "нед", "sun"]
     }
     
-    for day_name, variants in days_map.items():
+    for standard_name, variants in days_map.items():
         for variant in variants:
-            # Перевіряємо, чи рядок починається з цього варіанту
             if clean_line.startswith(variant):
-                return day_name
-            
+                return standard_name
     return None
 
 def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
@@ -63,13 +56,16 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
 
         schedule_data = {} 
 
-        # --- ВАРІАНТ 1: HTML Блоки (view-grouping) ---
+        # --- ВАРІАНТ 1: HTML Блоки ---
         days = content_div.find_all('div', class_='view-grouping')
         if days:
             for day_block in days:
                 header = day_block.find('span', class_='view-grouping-header')
                 raw_day = header.get_text(strip=True) if header else "Інше"
-                day_name = get_day_from_string(raw_day) or raw_day # Використовуємо нашу нову функцію
+                
+                # НОРМАЛІЗАЦІЯ НАЗВИ ДНЯ
+                day_name = get_standard_day_name(raw_day)
+                if not day_name: continue # Пропускаємо, якщо не змогли визначити день
                 
                 day_text = f"📅 *{day_name}* ({group_name})\n\n"
                 has_pairs = False
@@ -94,7 +90,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                 if has_pairs:
                     schedule_data[day_name] = day_text
 
-        # --- ВАРІАНТ 2: Текстовий парсинг (Backup) ---
+        # --- ВАРІАНТ 2: Текстовий парсинг ---
         if not schedule_data:
             raw_text = content_div.get_text(separator="\n", strip=True)
             lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
@@ -103,27 +99,21 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
             temp_schedule = {}
 
             for line in lines:
-                # 1. День тижня?
-                detected_day = get_day_from_string(line)
+                detected_day = get_standard_day_name(line)
                 if detected_day:
                     current_day = detected_day
-                    # Якщо такий день вже був (іноді буває дублювання), продовжуємо його
                     if current_day not in temp_schedule:
                         temp_schedule[current_day] = []
                     continue
                 
-                # 2. Номер пари (1-8)?
                 if current_day and re.match(r'^[1-8]$', line):
                     temp_schedule[current_day].append({'num': line, 'text': ""})
                     continue
 
-                # 3. Текст пари
                 if current_day and current_day in temp_schedule and temp_schedule[current_day]:
                     last_pair = temp_schedule[current_day][-1]
-                    # Додаємо текст до останньої пари
                     last_pair['text'] += ("\n" if last_pair['text'] else "") + line
 
-            # Формуємо результат
             for day, pairs in temp_schedule.items():
                 day_text = f"📅 *{day}* ({group_name})\n\n"
                 has_pairs_in_day = False
@@ -149,4 +139,5 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
     except Exception as e:
         logger.error(f"Parser Error: {e}")
         return {"Info": "⚠️ Помилка парсера."}
+
 
