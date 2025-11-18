@@ -8,11 +8,27 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://student.lpnu.ua"
 
+def normalize_text(text):
+    """
+    Замінює англійські літери, схожі на українські, на українські.
+    Видаляє зайві пробіли.
+    """
+    if not text: return ""
+    
+    # Таблиця замін (Латиниця -> Кирилиця)
+    replacements = {
+        'A': 'А', 'B': 'В', 'C': 'С', 'E': 'Е', 'H': 'Н', 'I': 'І', 'K': 'К',
+        'M': 'М', 'O': 'О', 'P': 'Р', 'T': 'Т', 'X': 'Х', 'Y': 'У',
+        'a': 'а', 'c': 'с', 'e': 'е', 'i': 'і', 'k': 'к', 'o': 'о', 'p': 'р', 'x': 'х'
+    }
+    
+    clean = text.strip()
+    for lat, cyr in replacements.items():
+        clean = clean.replace(lat, cyr)
+    
+    return clean
+
 def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
-    """
-    Повертає словник розкладу.
-    Вміє парсити як стандартну верстку, так і "сирий" текст.
-    """
     schedule_url = f"{BASE_URL}/students_schedule"
     params = {
         "studygroup_abbrname": group_name,
@@ -22,7 +38,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
 
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0'
         }
         response = requests.get(schedule_url, params=params, headers=headers)
         response.raise_for_status()
@@ -33,16 +49,21 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
         if not content_div:
             if "не знайдено" in soup.text.lower():
                 return {"Info": f"❌ Групу **{group_name}** не знайдено."}
-            return {"Info": "❌ Не вдалося отримати дані."}
+            return {"Info": "❌ Помилка: Не вдалося отримати розклад."}
 
         schedule_data = {} 
+        
+        # Список днів для Regex (враховуємо крапки, пробіли і повні назви)
+        # (Пн|Понеділок|Вівторок|Вт|...)
+        days_pattern = r'^(Пн|Понеділок|Вт|Вівторок|Ср|Середа|Чт|Четвер|Пт|П\'ятниця|Пятниця|Сб|Субота|Нд|Неділя)\.?$'
 
-        # --- СПРОБА 1: Стандартна структура (view-grouping) ---
+        # --- СПРОБА 1: HTML структура ---
         days = content_div.find_all('div', class_='view-grouping')
         if days:
             for day_block in days:
                 header = day_block.find('span', class_='view-grouping-header')
-                day_name = header.get_text(strip=True) if header else "Інше"
+                day_name_raw = header.get_text(strip=True) if header else "Інше"
+                day_name = normalize_text(day_name_raw) # Чистимо назву
                 
                 day_text = f"📅 *{day_name}* ({group_name})\n\n"
                 has_pairs = False
@@ -54,7 +75,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                     
                     content = row.find('div', class_='group_content')
                     if not content: content = row
-                    full_pair_text = content.get_text(separator=" ", strip=True)
+                    full_pair_text = normalize_text(content.get_text(separator=" ", strip=True))
 
                     if subgroup:
                         if f"підгр. {3-int(subgroup)}" in full_pair_text.lower() or \
@@ -67,60 +88,45 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                 if has_pairs:
                     schedule_data[day_name] = day_text
 
-        # --- СПРОБА 2: Парсинг "сирого" тексту (Regex) ---
-        # Якщо Спроба 1 нічого не дала, але текст є
+        # --- СПРОБА 2: Текстовий парсинг (Backup) ---
         if not schedule_data:
             raw_text = content_div.get_text(separator="\n", strip=True)
+            raw_text = normalize_text(raw_text) # Чистимо весь текст від латиниці
             
-            # Список днів для пошуку
-            days_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
-            
-            # Розбиваємо текст на рядки
             lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
             
             current_day = None
             current_pair = None
-            buffer_pair_text = []
             
-            # Словник для проміжного зберігання: {'Пн': [{'num': '1', 'text': 'Матема...'}]}
             temp_schedule = {}
 
             for line in lines:
-                # 1. Чи це День тижня? (Пн, Вт...)
-                if line in days_names:
-                    current_day = line
+                # 1. Шукаємо день тижня за допомогою Regex
+                if re.match(days_pattern, line, re.IGNORECASE):
+                    current_day = line.replace(".", "") # Прибираємо можливу крапку
                     temp_schedule[current_day] = []
                     current_pair = None
                     continue
                 
-                # 2. Чи це Номер пари? (1, 2, 3...)
-                # Перевіряємо, чи рядок складається тільки з однієї цифри 1-9
+                # 2. Шукаємо номер пари (просто цифра 1-8)
                 if current_day and re.match(r'^[1-8]$', line):
                     current_pair = line
-                    # Додаємо нову пару в список цього дня
                     temp_schedule[current_day].append({'num': current_pair, 'text': ""})
                     continue
 
-                # 3. Це текст пари
+                # 3. Текст пари
                 if current_day and current_pair:
-                    # Дописуємо текст до останньої пари поточного дня
                     if temp_schedule[current_day]:
-                        last_pair_idx = len(temp_schedule[current_day]) - 1
-                        # Додаємо пробіл, якщо там вже щось є
-                        if temp_schedule[current_day][last_pair_idx]['text']:
-                            temp_schedule[current_day][last_pair_idx]['text'] += "\n" + line
-                        else:
-                            temp_schedule[current_day][last_pair_idx]['text'] = line
+                        last = temp_schedule[current_day][-1]
+                        last['text'] += ("\n" if last['text'] else "") + line
 
-            # Формуємо фінальний гарний словник
+            # Формуємо результат
             for day, pairs in temp_schedule.items():
                 day_text = f"📅 *{day}* ({group_name})\n\n"
                 has_pairs_in_day = False
                 
                 for pair in pairs:
                     full_text = pair['text']
-                    
-                    # Фільтрація підгрупи (те ж саме, що і вище)
                     if subgroup:
                         if f"підгр. {3-int(subgroup)}" in full_text.lower() or \
                            f"підгрупа {3-int(subgroup)}" in full_text.lower():
@@ -132,12 +138,12 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                 if has_pairs_in_day:
                     schedule_data[day] = day_text
 
-        # --- ФІНАЛ ---
         if not schedule_data:
-             return {"Info": "📭 Розклад порожній (або вихідні)."}
+            return {"Info": "📭 Розклад порожній."}
 
         return schedule_data
 
     except Exception as e:
         logger.error(f"Parser Error: {e}")
-        return {"Info": "⚠️ Технічна помилка парсера."}
+        return {"Info": "⚠️ Помилка парсера."}
+
