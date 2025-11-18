@@ -1,19 +1,14 @@
 import requests
 from bs4 import BeautifulSoup
 
-# ПРАВИЛЬНА АДРЕСА САЙТУ:
 BASE_URL = "https://student.lpnu.ua"
 
-
-def fetch_schedule_data(group_name="АВ-11", semester="1", duration="1"):
+def fetch_schedule_data(group_name="АВ-11", semester="1", duration="1", subgroup=None):
     """
-    Формує URL, робить запит і парсить розклад для вказаної групи.
+    Парсить розклад і повертає відформатований рядок.
+    subgroup: номер підгрупи (1 або 2). Якщо None - показує все.
     """
-
-    # 1. Формуємо повний URL
     schedule_url = f"{BASE_URL}/students_schedule"
-
-    # 'params' - це те, що буде додано до URL після знаку '?'
     params = {
         "studygroup_abbrname": group_name,
         "semestr": semester,
@@ -21,41 +16,85 @@ def fetch_schedule_data(group_name="АВ-11", semester="1", duration="1"):
     }
 
     try:
-        # 2. Робимо GET-запит
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
         }
         response = requests.get(schedule_url, params=params, headers=headers)
         response.raise_for_status()
 
-        # 3. "Готуємо суп" з HTML-коду
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Знаходимо головний контейнер з розкладом
+        content_div = soup.find('div', class_='view-content')
+        
+        if not content_div:
+            return f"❌ Не вдалося знайти розклад для групи {group_name}. Можливо, такої групи не існує або сайт змінився."
 
-        # 4. ШУКАЄМО РОЗКЛАД
-        # <div class="view-content">
-        schedule_content = soup.find('div', class_='view-content')
+        # --- НОВА ЛОГІКА ПАРСИНГУ ---
+        final_text = f"📅 **Розклад для {group_name}**\n"
+        if subgroup:
+             final_text += f"👤 Підгрупа: {subgroup}\n"
+        final_text += "➖➖➖➖➖➖➖➖➖➖\n"
 
-        if not schedule_content:
-            return "Не вдалося знайти блок <div class='view-content'> на сторінці. Можливо, структура сайту змінилась, або для цієї групи немає розкладу."
+        # Дні тижня на сайті ЛП зазвичай розділені заголовками <h3>
+        # Ми будемо йти по всіх елементах всередині view-content
+        
+        current_day = ""
+        found_any = False
 
-        # 5. Очищуємо і форматуємо текст
-        full_text = schedule_content.get_text(separator="\n", strip=True)
+        # Знаходимо всі заголовки днів (Пн, Вт...)
+        days = content_div.find_all('div', class_='view-grouping')
+        
+        if not days:
+             # Якщо структура інша (без view-grouping), пробуємо старий метод
+             return "⚠️ Структура сторінки нетипова. Ось сирий текст:\n" + content_div.get_text(separator="\n", strip=True)
 
-        # Прибираємо зайві порожні рядки
-        cleaned_lines = [line for line in full_text.split('\n') if line.strip()]
+        for day_block in days:
+            # Заголовок дня (Пн, Вт...)
+            header = day_block.find('span', class_='view-grouping-header')
+            if header:
+                current_day = header.get_text(strip=True)
+                final_text += f"\n🗓 **{current_day}**\n"
+            
+            # Пари в цьому дні
+            # Шукаємо всі рядки контенту
+            rows = day_block.find_all('div', class_='stud_schedule')
+            
+            for row in rows:
+                # Номер пари
+                num_header = row.find_previous('h3') # Зазвичай номер пари стоїть перед блоком stud_schedule
+                pair_num = num_header.get_text(strip=True) if num_header else "?"
+                
+                # Текст пари (Предмет, викладач...)
+                # Знаходимо блоки <div id="group_full"> або просто текст
+                # На сайті ЛП часто структура:
+                # <div class="stud_schedule">
+                #    <div class="group_content">...</div>
+                # </div>
+                
+                content = row.find('div', class_='group_content')
+                if not content: 
+                    content = row # Якщо немає group_content, беремо весь блок
+                
+                text_lines = [line.strip() for line in content.get_text(separator="\n").split('\n') if line.strip()]
+                full_pair_text = ", ".join(text_lines)
 
-        return "\n".join(cleaned_lines)
+                # --- Фільтрація за підгрупою ---
+                # Часто підгрупа пишеться як (підгр. 1) або просто у тексті
+                if subgroup:
+                    # Якщо користувач вибрав 1, а в тексті пари написано "підгр. 2" -> пропускаємо
+                    if f"підгр. {3-int(subgroup)}" in full_pair_text.lower() or \
+                       f"підгрупа {3-int(subgroup)}" in full_pair_text.lower():
+                        continue
+                
+                final_text += f"  🔹 *{pair_num} пара*: {full_pair_text}\n"
+                found_any = True
+        
+        if not found_any:
+            return "Пар не знайдено. Можливо, вільний день! 😎"
 
-    except requests.RequestException as e:
-        print(f"Помилка запиту: {e}")
-        return f"Не вдалося підключитися до сайту університету. Помилка: {e}"
+        return final_text
+
     except Exception as e:
         print(f"Помилка парсингу: {e}")
-        return f"Не вдалося обробити сторінку. Помилка: {e}"
-
-
-# --- Це для тестування парсера окремо ---
-if __name__ == '__main__':
-    print("Тестування парсера... (не забудьте VPN)")
-    schedule = fetch_schedule_data(group_name="АВ-11")
-    print(schedule)
+        return "⚠️ Сталася помилка при обробці даних з сайту."
