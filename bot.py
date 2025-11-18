@@ -79,7 +79,7 @@ def run_bot():
     logger.info("Запускаю Telegram бота...")
     # loop = asyncio.new_event_loop()
     # asyncio.set_event_loop(loop)
-    application.run_polling()
+    application.run_polling(stop_signals=None)
 
 # --- ГОЛОВНИЙ ЗАПУСК ---
 if __name__ == '__main__':
@@ -94,3 +94,4 @@ if __name__ == '__main__':
     
     # host='0.0.0.0' означає "слухати весь інтернет", це обов'язково для Render
     app.run(host='0.0.0.0', port=port)
+
