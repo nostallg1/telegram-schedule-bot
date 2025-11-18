@@ -8,9 +8,15 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://student.lpnu.ua"
 
-# ... (весь код get_standard_day_name, DAY_MAP, escape_markdown без змін)
+# --- Функція екранування та визначення дня (без змін) ---
+def escape_markdown(text):
+    """
+    Екранує всі MarkdownV2 символи, які можуть бути в назвах предметів.
+    """
+    text = re.sub(r'([.()\[\]-])', r'\\\1', text)
+    text = re.sub(r'([~`>#=+|\{}!])', r'\\\1', text)
+    return text.replace('_', r'\_').replace('*', r'\*')
 
-# ... (весь код get_standard_day_name, DAY_MAP, escape_markdown без змін)
 DAY_MAP = {
     "Понеділок": ["пн", "пон", "mon"],
     "Вівторок":  ["вт", "вів", "bt", "vt", "tue"],
@@ -22,7 +28,6 @@ DAY_MAP = {
 }
 
 def get_standard_day_name(line):
-    # ... (код без змін)
     clean_line = re.sub(r'[^\w]', '', line).lower()
     
     for standard_name, variants in DAY_MAP.items():
@@ -40,8 +45,17 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
     }
 
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(schedule_url, params=params, headers=headers)
+        # --- КРИТИЧНО ВАЖЛИВА ЗМІНА: Реалістичні заголовки ---
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Connection': 'keep-alive',
+        }
+        
+        # requests.get автоматично підтримує до 30 перенаправлень. Ми покладаємося на те,
+        # що нові заголовки зламають цикл перенаправлень.
+        response = requests.get(schedule_url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -50,60 +64,13 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
         if not content_div:
             if "не знайдено" in soup.text.lower():
                 return {"Info": f"❌ Групу **{group_name}** не знайдено."}
-            return {"Info": "❌ Не вдалося отримати розклад."}
+            return {"Info": "❌ Не вдалося отримати розклад. Сайт повернув незрозумілу відповідь."}
 
         schedule_data = {} 
         
-        
-        # --- ФУНКЦІЯ ФІЛЬТРАЦІЇ ПАР (Додано) ---
-        def is_pair_for_excluded_subgroup(text, current_subgroup):
-            """
-            Перевіряє, чи пара призначена для протилежної підгрупи.
-            Наприклад, якщо обрано '1', шукаємо '2'.
-            """
-            if not current_subgroup:
-                return False # Не фільтруємо, якщо обрано "Вся група"
-
-            # Визначаємо підгрупу, яку потрібно виключити
-            excluded_subgroup = str(3 - int(current_subgroup)) 
-            
-            # Варіанти, які вказують на ВИКЛЮЧЕНУ підгрупу:
-            patterns = [
-                f"(підгр\. {excluded_subgroup})",   # (підгр. 2)
-                f"(підгрупа {excluded_subgroup})",  # (підгрупа 2)
-                f"(\({excluded_subgroup}\))",       # (2) - Тільки цифра в дужках
-                f"({excluded_subgroup}\s*п/г)",     # 2 п/г
-                f"({excluded_subgroup}\s*п/гр)",    # 2 п/гр
-            ]
-            
-            # Якщо знайдено будь-який з цих патернів, повертаємо True (цю пару треба пропустити)
-            for pattern in patterns:
-                if re.search(pattern, text, re.IGNORECASE):
-                    # Важливо: якщо в тексті є (1) І (2), то це для ВСІЄЇ групи.
-                    # Перевіряємо, чи немає одночасно обох підгруп
-                    if re.search(f"\([1-2]\)", text) and re.search(f"\([1-2]\)", text.replace(f"({excluded_subgroup})", "")):
-                        return False # Якщо є обидві, не фільтруємо
-
-                    return True
-            
-            # Якщо пара не містить номерів підгруп взагалі, припускаємо, що вона для ВСІЄЇ групи
-            # Якщо пара має лише (1) і ми обрали (2) — це нормально.
-            
-            # Спеціальна перевірка: якщо пара має лише *нашу* підгрупу (1), 
-            # але ми обрали протилежну (2), то ми її пропускаємо.
-            our_sub = str(current_subgroup)
-            
-            # Якщо в тексті Є позначка (1) і НЕМАЄ позначки (2), і ми обрали 2-гу
-            if re.search(f"\({our_sub}\)", text) and not re.search(f"\({excluded_subgroup}\)", text):
-                 if our_sub != current_subgroup:
-                    return True
-
-            return False
-        # --- КІНЕЦЬ ФУНКЦІЇ ФІЛЬТРАЦІЇ ---
-
-
         # --- СПРОБА 1: HTML Блоки ---
         days = content_div.find_all('div', class_='view-grouping')
+        # ... (логіка обробки HTML блоків, залишена без змін)
         if days:
             for day_block in days:
                 header = day_block.find('span', class_='view-grouping-header')
@@ -123,10 +90,12 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                     if not content: content = row
                     full_pair_text = content.get_text(separator=" ", strip=True).strip()
 
-                    # ВІДТІКАННЯ: Нова, надійна перевірка
-                    if is_pair_for_excluded_subgroup(full_pair_text, subgroup):
-                        continue
-
+                    if subgroup:
+                        excluded_subgroup = str(3 - int(subgroup))
+                        if re.search(f"(підгр\. {excluded_subgroup})", full_pair_text, re.IGNORECASE) or \
+                           re.search(f"(\({excluded_subgroup}\))", full_pair_text):
+                            continue
+                            
                     day_text += f"⏰ *{pair_num} пара*\n📖 {escape_markdown(full_pair_text)}\n──────────────\n"
                     has_pairs = True
                 
@@ -135,7 +104,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
 
         # --- СПРОБА 2: Текстовий парсинг ---
         if not schedule_data:
-            # ... (логіка текстового парсингу)
+            # ... (логіка текстового парсингу, залишена без змін)
             raw_text = content_div.get_text(separator="\n", strip=True)
             lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
             
@@ -146,7 +115,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
             for line in lines:
                 detected_match = day_start_pattern.match(line)
                 if detected_match:
-                    day_part = detected_match.group(0) 
+                    day_part = detected_match.group(0)
                     detected_day = get_standard_day_name(day_part)
                     
                     if detected_day:
@@ -176,9 +145,11 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                 for pair in pairs:
                     full_text = pair['text']
                     
-                    # ВІДТІКАННЯ: Нова, надійна перевірка
-                    if is_pair_for_excluded_subgroup(full_text, subgroup):
-                        continue
+                    if subgroup:
+                        excluded_subgroup = str(3 - int(subgroup))
+                        if re.search(f"(підгр\. {excluded_subgroup})", full_text, re.IGNORECASE) or \
+                           re.search(f"(\({excluded_subgroup}\))", full_text):
+                            continue
                     
                     escaped_text = escape_markdown(full_text)
                     
@@ -193,7 +164,10 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
 
         return schedule_data
 
+    except requests.exceptions.TooManyRedirects:
+        logger.error("Exceeded 30 redirects (Site blocking bot).")
+        return {"Info": "🛑 Помилка. Сайт університету заблокував запит (захист від ботів). Спробуйте пізніше."}
     except Exception as e:
-        logger.error(f"Parser Error: {e}")
-        return {"Info": "⚠️ Помилка парсера."}
+        logger.error(f"Parser Error: {e}", exc_info=True)
+        return {"Info": "⚠️ Невідома помилка парсера."}
 
