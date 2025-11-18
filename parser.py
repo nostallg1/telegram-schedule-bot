@@ -8,27 +8,27 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://student.lpnu.ua"
 
-# --- НОВА ФУНКЦІЯ ЕКРАНУВАННЯ ---
+# --- ФУНКЦІЯ ЕКРАНУВАННЯ (ОНОВЛЕНО) ---
 def escape_markdown(text):
-    """Екранує MarkdownV2 символи, щоб вони відображались як звичайний текст."""
-    # Ми використовуємо MarkdownV2 для надійності, тому екрануємо всі його спецсимволи
-    # Спецсимволи: _ * [ ] ( ) ~ ` > # + - = | { } . ! 
+    """
+    Екранує всі MarkdownV2 символи, які можуть бути в назвах предметів.
+    Символи: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    """
+    # Екрануємо ВСІ спецсимволи MarkdownV2, крім тих, що ми використовуємо (напр., * для жирного)
+    # Оскільки ми використовуємо * для жирного і не використовуємо _, ми екрануємо всі інші
+    chars_to_escape = r'[\[\]()~`>#+=|{}.!]'
     
-    # Використовуємо ретельну заміну
-    text = text.replace('.', '\.')
-    text = text.replace('-', '\-')
-    text = text.replace('(', '\(')
-    text = text.replace(')', '\)')
-    text = text.replace('|', '\|')
+    # Використовуємо ретельну заміну для дефісів та крапок, якщо вони є.
+    # Заміна символів: . - ( ) | [ ]
+    text = re.sub(r'([.()\[\]-])', r'\\\1', text)
     
-    # Залишаємо зірочки та підкреслення, оскільки ми їх використовуємо для *пар* і _опису_
-    # Однак, якщо виникне помилка, ми можемо додати їх сюди.
-    # Але для початку, виправляємо найбільш поширені: . - ( )
-    return text
+    # Екрануємо інші спецсимволи
+    text = re.sub(r'([~`>#=+|\{}!])', r'\\\1', text)
 
-# ... (весь код get_standard_day_name та DAY_MAP без змін)
+    return text.replace('_', r'\_').replace('*', r'\*')
 
-# ... (весь код get_standard_day_name та DAY_MAP без змін)
+
+# --- Функції визначення дня (без змін) ---
 DAY_MAP = {
     "Понеділок": ["пн", "пон", "mon"],
     "Вівторок":  ["вт", "вів", "bt", "vt", "tue"],
@@ -40,7 +40,6 @@ DAY_MAP = {
 }
 
 def get_standard_day_name(line):
-    # ... (функція без змін)
     clean_line = re.sub(r'[^\w]', '', line).lower()
     
     for standard_name, variants in DAY_MAP.items():
@@ -65,7 +64,6 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
         soup = BeautifulSoup(response.text, 'html.parser')
         content_div = soup.find('div', class_='view-content')
         
-        # ... (перевірки контенту без змін)
         if not content_div:
             if "не знайдено" in soup.text.lower():
                 return {"Info": f"❌ Групу **{group_name}** не знайдено."}
@@ -82,7 +80,6 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                 day_name = get_standard_day_name(raw_day)
                 if not day_name: continue 
                 
-                # Заголовки *форматуємо* окремо, щоб вони були жирними
                 day_text = f"📅 *{day_name}* ({group_name})\n\n"
                 has_pairs = False
                 
@@ -116,18 +113,24 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
             
             current_day = None
             temp_schedule = {}
+            day_start_pattern = re.compile(r'^(Понеділок|Вівторок|Середа|Четвер|П\'ятниця|Субота|Неділя|Пн|Вт|Ср|Чт|Пт|Сб|Нд)\b', re.IGNORECASE)
 
-            # ... (логіка текстового парсингу без змін)
             for line in lines:
-                detected_day = get_standard_day_name(line)
-                if detected_day:
-                    current_day = detected_day
-                    if current_day not in temp_schedule:
-                        temp_schedule[current_day] = []
+                detected_match = day_start_pattern.match(line)
+                if detected_match:
+                    day_part = detected_match.group(0) # Виправлено: отримуємо day_part тут
+                    detected_day = get_standard_day_name(day_part)
                     
-                    remainder = line[len(day_part):].strip() # Тут була помилка змінної day_part, але я залишив попередню логіку для сумісності
-
-                    continue
+                    if detected_day:
+                        current_day = detected_day
+                        if current_day not in temp_schedule:
+                            temp_schedule[current_day] = []
+                        
+                        remainder = line[len(day_part):].strip() # Тепер day_part визначена
+                        if remainder and re.match(r'^[1-8]$', remainder.split()[0]):
+                            pair_num = remainder.split()[0]
+                            temp_schedule[current_day].append({'num': pair_num, 'text': remainder[len(pair_num):].strip()})
+                        continue
 
                 if current_day and re.match(r'^[1-8]$', line):
                     temp_schedule[current_day].append({'num': line, 'text': ""})
@@ -149,7 +152,6 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None):
                            f"підгрупа {3-int(subgroup)}" in full_text.lower():
                             continue
                     
-                    # Екранування тексту пари
                     escaped_text = escape_markdown(full_text)
                     
                     day_text += f"⏰ *{pair['num']} пара*\n📖 {escaped_text}\n──────────────\n"
