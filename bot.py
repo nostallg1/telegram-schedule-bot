@@ -22,18 +22,14 @@ SCHEDULE_CACHE = {}
 TARGET_DAYS = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця"]
 DAY_SHORT_NAMES = {"Понеділок": "Пн", "Вівторок": "Вт", "Середа": "Ср", "Четвер": "Чт", "П'ятниця": "Пт"}
 
-# --- КОМАНДИ ---
-
+# --- START ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "👋 <b>Привіт! Я бот розкладу ЛП.</b>\n\n"
-        "Щоб почати, введіть команду:\n"
+        "Введіть команду:\n"
         "👉 <code>/rozklad АВ-11</code>\n"
-        "👉 <code>/rozklad КН-101</code>\n\n"
-        "ℹ️ /info - про бота\n"
         "🛠 /support - підтримка"
     )
-    # ТУТ І ДАЛІ ВИКОРИСТОВУЄМО HTML
     await update.message.reply_text(text, parse_mode='HTML')
 
 async def get_rozklad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -44,17 +40,13 @@ async def get_rozklad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     USER_GROUPS[chat_id] = group
 
+    # КРОК 1: Підгрупа
     keyboard = [
         [InlineKeyboardButton("👤 1 підгрупа", callback_data=f"sub_1_{group}"),
          InlineKeyboardButton("👤 2 підгрупа", callback_data=f"sub_2_{group}")],
         [InlineKeyboardButton("👥 Вся група", callback_data=f"sub_all_{group}")]
     ]
-    
-    await update.message.reply_text(
-        f"🎓 Група: <b>{group}</b>\nОберіть підгрупу:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+    await update.message.reply_text(f"🎓 Група: <b>{group}</b>\nОберіть підгрупу:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("ℹ️ Бот парсить дані з student.lpnu.ua")
@@ -62,25 +54,26 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🛠 Підтримка: <code>4441111131351441</code>", parse_mode='HTML')
 
-# --- КНОПКИ ---
-
-async def load_schedule_and_show_days(query, group, subgroup_param, subgroup_name, retry=False):
+# --- LOAD LOGIC ---
+async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=False):
     chat_id = query.message.chat_id
     if not retry:
-        await query.edit_message_text(f"⏳ Отримую розклад для <b>{group}</b> ({subgroup_name})...", parse_mode='HTML')
+        await query.edit_message_text(f"⏳ Отримую розклад: <b>{group}</b>, {sub_name}, {week_name}...", parse_mode='HTML')
         
     try:
         loop = asyncio.get_running_loop()
-        schedule_data = await loop.run_in_executor(None, fetch_schedule_dict, group, "1", "1", subgroup_param)
+        # Викликаємо парсер з week_filter
+        schedule_data = await loop.run_in_executor(None, fetch_schedule_dict, group, "1", "1", sub_param, week_param)
         
         if not schedule_data or "Info" in schedule_data:
-            msg = schedule_data.get("Info", "❌ Помилка з'єднання.") if schedule_data else "❌ Помилка."
+            msg = schedule_data.get("Info", "❌ Помилка.") if schedule_data else "❌ Помилка."
             await query.edit_message_text(msg, parse_mode='HTML')
             return
 
         SCHEDULE_CACHE[chat_id] = {
             'data': schedule_data, 'group': group, 
-            'subgroup_param': subgroup_param, 'subgroup_name': subgroup_name
+            'sub': sub_param, 'sub_n': sub_name,
+            'week': week_param, 'week_n': week_name
         }
 
         keyboard = []
@@ -88,84 +81,182 @@ async def load_schedule_and_show_days(query, group, subgroup_param, subgroup_nam
         for day_name in TARGET_DAYS:
             if day_name in schedule_data:
                 short = DAY_SHORT_NAMES.get(day_name, day_name)
-                callback = f"fetch_day_{day_name}_{group}_{subgroup_param}"
+                # Скорочений callback для економії байтів: fd_Пн_Група_Підгр_Тиждень
+                # week_param може бути 'chys', 'znam', 'all'
+                wk = week_param if week_param else 'all'
+                sb = sub_param if sub_param else 'all'
+                
+                callback = f"fd_{day_name[:2]}_{group}_{sb}_{wk}"
                 row.append(InlineKeyboardButton(short, callback_data=callback))
             if len(row) == 3:
                 keyboard.append(row)
                 row = []
         if row: keyboard.append(row)
-        keyboard.append([InlineKeyboardButton("🔙 Змінити підгрупу", callback_data="back_to_subs")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Змінити тиждень", callback_data=f"back_to_weeks_{sub_param}_{group}")])
 
         if not keyboard or (len(keyboard) == 1):
-             await query.edit_message_text(f"📭 Розклад для <b>{group}</b> ({subgroup_name}) на будні дні порожній.", parse_mode='HTML')
+             await query.edit_message_text(f"📭 Розклад для <b>{group}</b> ({sub_name}, {week_name}) порожній.", parse_mode='HTML')
              return
 
         await query.edit_message_text(
-            f"✅ Розклад для <b>{group}</b> ({subgroup_name}) готовий!\nОберіть день:",
+            f"✅ <b>{group}</b> ({sub_name}, {week_name})\nОберіть день:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
         )
     except Exception as e:
         logger.error(f"Error: {e}")
-        await query.edit_message_text("❌ Сталася помилка при завантаженні.")
+        await query.edit_message_text("❌ Помилка.", parse_mode='HTML')
 
+# --- BUTTONS ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
     data = query.data
     await query.answer()
 
+    # 1. ОБРАНО ПІДГРУПУ -> ПОКАЗУЄМО ТИЖНІ (НОВЕ!)
     if data.startswith("sub_"):
         try:
             _, sub_choice, group = data.split("_", 2)
+            
+            # Меню тижнів
+            keyboard = [
+                [InlineKeyboardButton("numerator (Чисельник)", callback_data=f"week_chys_{sub_choice}_{group}")],
+                [InlineKeyboardButton("denominator (Знаменник)", callback_data=f"week_znam_{sub_choice}_{group}")],
+                [InlineKeyboardButton("Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")]
+            ]
+            
+            sub_name = f"підгр. {sub_choice}" if sub_choice != "all" else "Вся група"
+            await query.edit_message_text(f"🎓 <b>{group}</b> ({sub_name})\n📅 Оберіть тиждень:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        except ValueError: await query.edit_message_text("⚠️ Помилка.")
+        return
+
+    # 2. ОБРАНО ТИЖДЕНЬ -> ЗАВАНТАЖЕННЯ
+    if data.startswith("week_"):
+        try:
+            # week_chys_1_AB-11
+            parts = data.split("_")
+            week_choice = parts[1]
+            sub_choice = parts[2]
+            group = parts[3]
+
             sub_param = sub_choice if sub_choice in ["1", "2"] else None
             sub_name = f"підгр. {sub_choice}" if sub_choice != "all" else "Вся група"
-            await load_schedule_and_show_days(query, group, sub_param, sub_name)
-        except ValueError: await query.edit_message_text("⚠️ Помилка даних.")
+            
+            week_param = week_choice if week_choice in ["chys", "znam"] else None
+            week_name = "Чисельник" if week_choice == "chys" else ("Знаменник" if week_choice == "znam" else "Всі тижні")
+
+            await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name)
+        except Exception as e: 
+            logger.error(e)
+            await query.edit_message_text("⚠️ Помилка.")
         return
 
-    if data.startswith("fetch_day_"):
+    # 3. ОБРАНО ДЕНЬ (fd_Пн_АВ-11_1_chys)
+    if data.startswith("fd_"):
         try:
-            _, _, day_name, group, sub_param = data.split("_")
+            parts = data.split("_")
+            day_short = parts[1]
+            group = parts[2]
+            sub_raw = parts[3]
+            week_raw = parts[4]
+
+            # Відновлюємо параметри для кешу
+            sub_param = sub_raw if sub_raw != "all" else None
+            week_param = week_raw if week_raw != "all" else None
             
+            # Шукаємо повну назву дня
+            day_full = next((k for k, v in DAY_SHORT_NAMES.items() if v == day_short), None)
+            
+            # Перевірка кешу
             cache = SCHEDULE_CACHE.get(chat_id)
-            if cache and cache.get('group') == group and cache.get('subgroup_param') == sub_param:
-                text = cache['data'].get(day_name, "Немає пар.")
-                kb = [[InlineKeyboardButton("🔙 До днів тижня", callback_data="back_to_days")]]
+            if cache and cache.get('group') == group and str(cache.get('sub')) == str(sub_param) and str(cache.get('week')) == str(week_param):
+                text = cache['data'].get(day_full, "Немає пар.")
+                # Кнопка "Назад" тепер має всі параметри для відновлення меню днів
+                back_callback = f"back_days_{group}_{sub_raw}_{week_raw}"
+                kb = [[InlineKeyboardButton("🔙 До днів тижня", callback_data=back_callback)]]
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
                 return
+            
+            # Кеш пустий? Перезавантажуємо!
+            sub_name = f"підгр. {sub_raw}" if sub_raw != "all" else "Вся група"
+            week_name = "Чисельник" if week_raw == "chys" else ("Знаменник" if week_raw == "znam" else "Всі тижні")
+            
+            await query.edit_message_text(f"⚠️ Оновлюю...", parse_mode='HTML')
+            await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=True)
 
-            sub_name = f"підгр. {sub_param}" if sub_param != "None" else "Вся група"
-            await query.edit_message_text(f"⚠️ Оновлюю розклад для <b>{group}</b>...", parse_mode='HTML')
-            await load_schedule_and_show_days(query, group, sub_param if sub_param != "None" else None, sub_name, retry=True)
-        except ValueError: await query.edit_message_text("⚠️ Помилка даних.")
+        except Exception as e:
+            logger.error(f"FD Error: {e}")
+            await query.edit_message_text("⚠️ Помилка даних.")
         return
 
-    if data == "back_to_days":
-        cache = SCHEDULE_CACHE.get(chat_id)
-        if not cache:
-            await query.edit_message_text("⚠️ Дані застаріли. Введіть /rozklad.", parse_mode='HTML')
-            return
+    # 4. НАЗАД ДО ДНІВ (back_days_AB-11_1_chys)
+    if data.startswith("back_days_"):
+        try:
+            parts = data.split("_")
+            group = parts[2]
+            sub_raw = parts[3]
+            week_raw = parts[4]
+            
+            # Спробуємо взяти з кешу
+            cache = SCHEDULE_CACHE.get(chat_id)
+            if not cache:
+                 # Якщо кешу немає, імітуємо натискання кнопки тижня для перезавантаження
+                 # Це трохи "костиль", але надійний
+                 sub_param = sub_raw if sub_raw != "all" else None
+                 sub_name = f"підгр. {sub_raw}" if sub_raw != "all" else "Вся група"
+                 week_param = week_raw if week_raw != "all" else None
+                 week_name = "Тиждень" # Спрощена назва
+                 await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=True)
+                 return
 
-        keyboard = []
-        row = []
-        for day_name in TARGET_DAYS:
-            if day_name in cache['data']:
-                short = DAY_SHORT_NAMES.get(day_name, day_name)
-                grp = cache['group']
-                sb = cache['subgroup_param']
-                row.append(InlineKeyboardButton(short, callback_data=f"fetch_day_{day_name}_{grp}_{sb}"))
+            # Малюємо дні з кешу
+            keyboard = []
+            row = []
+            for day_name in TARGET_DAYS:
+                if day_name in cache['data']:
+                    short = DAY_SHORT_NAMES.get(day_name, day_name)
+                    callback = f"fd_{day_name[:2]}_{group}_{sub_raw}_{week_raw}"
+                    row.append(InlineKeyboardButton(short, callback_data=callback))
                 if len(row) == 3:
                     keyboard.append(row)
                     row = []
-        if row: keyboard.append(row)
-        keyboard.append([InlineKeyboardButton("🔙 Змінити підгрупу", callback_data="back_to_subs")])
-        
-        await query.edit_message_text("📅 Оберіть день:", reply_markup=InlineKeyboardMarkup(keyboard))
+            if row: keyboard.append(row)
+            
+            # Кнопка "Назад" веде до вибору тижня
+            back_week_cb = f"back_to_weeks_{sub_raw}_{group}" # Повертаємось до вибору тижнів, зберігаючи підгрупу
+            keyboard.append([InlineKeyboardButton("🔙 Змінити тиждень", callback_data=back_week_cb)])
+            
+            await query.edit_message_text("📅 Оберіть день:", reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception as e:
+             logger.error(e)
+             await query.edit_message_text("Error back days")
         return
 
-    if data == "back_to_subs":
-        group = USER_GROUPS.get(chat_id, "АВ-11")
+    # 5. НАЗАД ДО ТИЖНІВ (back_to_weeks_1_AB-11)
+    if data.startswith("back_to_weeks_"):
+        try:
+            parts = data.split("_")
+            sub_choice = parts[3]
+            group = parts[4]
+            
+            keyboard = [
+                [InlineKeyboardButton("numerator (Чисельник)", callback_data=f"week_chys_{sub_choice}_{group}")],
+                [InlineKeyboardButton("denominator (Знаменник)", callback_data=f"week_znam_{sub_choice}_{group}")],
+                [InlineKeyboardButton("Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")]
+            ]
+            
+            # Кнопка "Назад" веде до вибору підгруп
+            keyboard.append([InlineKeyboardButton("🔙 Змінити підгрупу", callback_data=f"back_to_subs_{group}")])
+            
+            await query.edit_message_text("📅 Оберіть тиждень:", reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception as e: logger.error(e)
+        return
+
+    # 6. НАЗАД ДО ПІДГРУП
+    if data.startswith("back_to_subs_"):
+        group = data.split("_")[3]
         kb = [
             [InlineKeyboardButton("👤 1 підгрупа", callback_data=f"sub_1_{group}"),
              InlineKeyboardButton("👤 2 підгрупа", callback_data=f"sub_2_{group}")],
