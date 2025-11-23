@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://student.lpnu.ua"
 SCRAPER_API_KEY = os.environ.get('SCRAPER_API_KEY', None)
 
-# --- CONFIG ---
+# --- Config ---
 DAY_MAP = {
     "Понеділок": ["пн", "пон", "mon"],
     "Вівторок":  ["вт", "вів", "bt", "vt", "tue"],
@@ -37,7 +37,6 @@ def escape_markdown(text):
 
 # --- ВНУТРІШНЯ ФУНКЦІЯ ЗАПИТУ ---
 def make_request(group_name, semester, duration):
-    """Робить один конкретний запит до сайту"""
     schedule_url = f"{BASE_URL}/students_schedule"
     params = {
         "studygroup_abbrname": group_name,
@@ -45,26 +44,28 @@ def make_request(group_name, semester, duration):
         "semestrduration": duration
     }
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-        'Referer': BASE_URL + '/',
-    }
-    
-    # Затримка (тільки для прямих запитів, для ScraperAPI не критично)
-    if not SCRAPER_API_KEY:
-        time.sleep(0.5 + random.random())
-
+    # Логування для перевірки ключа
     if SCRAPER_API_KEY:
+        logger.info(f"🔑 SCRAPER_API_KEY знайдено. Використовую проксі для {group_name}...")
         payload = {
             'api_key': SCRAPER_API_KEY,
             'url': schedule_url + '?' + requests.compat.urlencode(params),
-            'render': 'true' # JS rendering допомагає
+            'render': 'true',
+            'keep_headers': 'true'
         }
+        # ScraperAPI не робить редіректів, він повертає результат
         response = requests.get('http://api.scraperapi.com', params=payload, timeout=60)
     else:
+        logger.warning(f"⚠️ SCRAPER_API_KEY не знайдено! Пробую прямий запит (ризик блокування)...")
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Referer': BASE_URL + '/',
+        }
+        time.sleep(1 + random.random() * 2)
         with requests.Session() as session:
             session.headers.update(headers)
+            # allow_redirects=True за замовчуванням, але requests має ліміт 30.
             response = session.get(schedule_url, params=params, timeout=15)
             
     return response
@@ -72,39 +73,38 @@ def make_request(group_name, semester, duration):
 # --- ГОЛОВНА ФУНКЦІЯ ---
 def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, week_filter=None):
     
-    # КРОК 1: Пробуємо запит з параметрами за замовчуванням (Duration=1)
-    logger.info(f"Trying {group_name} with duration=1...")
+    # КРОК 1: Duration=1 (Перша половина)
     try:
-        response = make_request(group_name, semester, "1") # Спочатку шукаємо в "Першій половині"
+        response = make_request(group_name, semester, "1")
         response.raise_for_status()
+    except requests.exceptions.TooManyRedirects:
+        logger.error("💀 BLOCKED: Too many redirects on direct request.")
+        return {"Info": "🚫 Сайт університету заблокував з'єднання (Redirect Loop). Потрібен ScraperAPI."}
     except Exception as e:
-        logger.error(f"Network error: {e}")
-        return {"Info": "❌ Помилка з'єднання."}
+        logger.error(f"Network error (1): {e}")
+        return {"Info": "❌ Помилка з'єднання з сайтом."}
 
     soup = BeautifulSoup(response.text, 'html.parser')
     content_div = soup.find('div', class_='view-content')
 
-    # КРОК 2: Якщо пусто, пробуємо Duration=2 (Друга половина семестру)
-    # Це "план Б", якщо в першій половині нічого немає
+    # КРОК 2: Якщо пусто, пробуємо Duration=2 (Друга половина)
     if not content_div or not content_div.find_all('div', class_='view-grouping'):
-        logger.info(f"Empty/Not found for duration=1. Trying duration=2...")
+        logger.info(f"Empty result for duration=1. Trying duration=2...")
         try:
             response_2 = make_request(group_name, semester, "2")
             if response_2.status_code == 200:
                 soup_2 = BeautifulSoup(response_2.text, 'html.parser')
                 content_div_2 = soup_2.find('div', class_='view-content')
                 if content_div_2 and content_div_2.find_all('div', class_='view-grouping'):
-                    # Ура! Знайшли розклад у другій половині
                     soup = soup_2
                     content_div = content_div_2
         except:
-            pass # Якщо і тут помилка, повертаємо результат першого запиту
+            pass
 
-    # --- Перевірка результату ---
     if not content_div:
         if "не знайдено" in soup.text.lower():
             return {"Info": f"❌ Групу <b>{html.escape(group_name)}</b> не знайдено."}
-        return {"Info": "❌ Не вдалося отримати дані."}
+        return {"Info": "❌ Не вдалося отримати дані (можливо, блокування)."}
 
     schedule_data = {} 
 
@@ -112,13 +112,10 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
     def is_pair_for_excluded_subgroup(text, current_subgroup):
         if not current_subgroup: return False
         excluded_subgroup = str(3 - int(current_subgroup))
-        # Патерни для виключення
         patterns = [f"\({excluded_subgroup}\)", f"підгр\.\s*{excluded_subgroup}", f"{excluded_subgroup}\s*п/г"]
         text_lower = text.lower()
-        
         for p in patterns:
             if re.search(p, text_lower, re.IGNORECASE):
-                # Якщо є маркер виключеної групи, перевіряємо чи немає маркера нашої
                 our_sub = str(current_subgroup)
                 if not re.search(f"\({our_sub}\)", text_lower): 
                     return True 
@@ -173,4 +170,5 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
     except Exception as e:
         logger.error(f"Parser Logic Error: {e}", exc_info=True)
         return {"Info": "⚠️ Помилка обробки."}
+
 
