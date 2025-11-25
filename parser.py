@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://student.lpnu.ua"
 SCRAPER_API_KEY = os.environ.get('SCRAPER_API_KEY', None)
 
-# --- Config ---
+# --- CONFIG ---
 DAY_MAP = {
     "Понеділок": ["пн", "пон", "mon"],
     "Вівторок":  ["вт", "вів", "bt", "vt", "tue"],
@@ -25,6 +25,7 @@ DAY_MAP = {
 }
 
 def get_standard_day_name(line):
+    # Видаляємо все, крім букв (щоб "Пн." стало "пн")
     clean_line = re.sub(r'[^\w]', '', line).lower()
     for standard_name, variants in DAY_MAP.items():
         for variant in variants:
@@ -35,9 +36,9 @@ def get_standard_day_name(line):
 def escape_markdown(text):
     return text
 
+# --- REQUEST FUNCTION ---
 def make_request(group_name, semester, duration):
     schedule_url = f"{BASE_URL}/students_schedule"
-    # Формуємо параметри
     params = {
         "studygroup_abbrname": group_name,
         "semestr": semester,
@@ -45,14 +46,11 @@ def make_request(group_name, semester, duration):
     }
     
     if SCRAPER_API_KEY:
-        # Спрощуємо запит до ScraperAPI
-        # Вимикаємо keep_headers, щоб ScraperAPI сам підібрав правильні заголовки
         payload = {
             'api_key': SCRAPER_API_KEY,
             'url': schedule_url + '?' + requests.compat.urlencode(params),
-            'render': 'true' # JS rendering залишаємо, він корисний
+            'render': 'true'
         }
-        logger.info(f"ScraperAPI URL: {payload['url']}") # Логуємо URL для перевірки
         response = requests.get('http://api.scraperapi.com', params=payload, timeout=60)
     else:
         headers = {
@@ -66,9 +64,10 @@ def make_request(group_name, semester, duration):
             
     return response
 
+# --- MAIN PARSER ---
 def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, week_filter=None):
     
-    # КРОК 1: Запит
+    # 1. Отримуємо HTML
     try:
         response = make_request(group_name, semester, "1")
         if response.status_code != 200:
@@ -80,37 +79,26 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
     soup = BeautifulSoup(response.text, 'html.parser')
     content_div = soup.find('div', class_='view-content')
 
-    # --- ДІАГНОСТИКА (Що бачить бот?) ---
-    # Якщо контент порожній або немає днів, спробуємо зрозуміти чому
-    days = []
-    if content_div:
-        days = content_div.find_all('div', class_='view-grouping')
-    
-    if not days:
-        # Якщо це не стандартний розклад, це може бути помилка сайту
-        if not content_div:
-            # Перевіряємо, чи це не сторінка захисту
-            page_text = soup.get_text(separator=" ", strip=True)
-            if "security" in page_text.lower() or "challenge" in page_text.lower():
-                return {"Info": "🛡 Бот натрапив на захист (Cloudflare). Спробуйте ще раз через хвилину."}
-            if "не знайдено" in page_text.lower():
-                return {"Info": f"❌ Сайт каже: Групу <b>{html.escape(group_name)}</b> не знайдено."}
-            
-            # Повертаємо шматок тексту для налагодження
-            return {"Info": f"⚠️ Дивна відповідь сайту (немає view-content). Початок тексту:\n{html.escape(page_text[:200])}"}
-        
-        # Якщо content_div є, але днів немає
-        raw_text = content_div.get_text(separator="\n", strip=True)
-        if len(raw_text) < 20:
-             return {"Info": f"📭 Сайт повернув порожню таблицю для <b>{group_name}</b>."}
-        
-        # Якщо текст є, але ми його не розпізнали - покажемо його!
-        return {"Info": f"⚠️ Не можу розпізнати формат. Ось що бачу:\n\n{html.escape(raw_text[:500])}"}
+    # 2. Спроба знайти розклад в другій половині семестру, якщо перша пуста
+    if not content_div or not content_div.find_all('div', class_='view-grouping'):
+        try:
+            response_2 = make_request(group_name, semester, "2")
+            if response_2.status_code == 200:
+                soup_2 = BeautifulSoup(response_2.text, 'html.parser')
+                content_div_2 = soup_2.find('div', class_='view-content')
+                if content_div_2 and (content_div_2.find_all('div', class_='view-grouping') or len(content_div_2.get_text(strip=True)) > 50):
+                    soup = soup_2
+                    content_div = content_div_2
+        except: pass
 
-    # --- ЯКЩО ВСЕ ОК, ПАРСИМО ---
+    if not content_div:
+        if "не знайдено" in soup.text.lower():
+            return {"Info": f"❌ Групу <b>{html.escape(group_name)}</b> не знайдено."}
+        return {"Info": "❌ Не вдалося отримати дані (можливо, захист сайту)."}
+
     schedule_data = {} 
 
-    # ... (код фільтрації is_pair_for_excluded_subgroup - такий самий, як був) ...
+    # --- Фільтр підгруп ---
     def is_pair_for_excluded_subgroup(text, current_subgroup):
         if not current_subgroup: return False
         excluded_subgroup = str(3 - int(current_subgroup))
@@ -122,7 +110,9 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
                 if not re.search(f"\({our_sub}\)", text_lower): return True 
         return False
 
-    try:
+    # === ВАРІАНТ 1: Парсинг HTML-блоків ===
+    days = content_div.find_all('div', class_='view-grouping')
+    if days:
         for day_block in days:
             header = day_block.find('span', class_='view-grouping-header')
             raw_day = header.get_text(strip=True) if header else ""
@@ -140,6 +130,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
 
                 num_header = row.find_previous('h3')
                 pair_num = num_header.get_text(strip=True) if num_header else "?"
+                
                 content = row.find('div', class_='group_content')
                 if not content: content = row
                 full_pair_text = content.get_text(separator=" ", strip=True).strip()
@@ -155,14 +146,60 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
             if has_pairs:
                 schedule_data[day_name] = day_text
 
-        if not schedule_data:
-            return {"Info": "📭 Розклад порожній (можливо, фільтри приховали всі пари)."}
-
-        return schedule_data
-
-    except Exception as e:
-        logger.error(f"Parser Logic Error: {e}", exc_info=True)
-        return {"Info": f"⚠️ Помилка коду: {e}"}
+    # === ВАРІАНТ 2: Текстовий парсинг (Гнучкий) ===
+    # Якщо HTML-блоків не знайдено або вони порожні, парсимо "сирий" текст
+    if not schedule_data:
+        raw_text = content_div.get_text(separator="\n", strip=True)
+        lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
         
+        current_day = None
+        temp_schedule = {}
 
+        for line in lines:
+            # 1. Шукаємо День (використовуємо нашу функцію)
+            detected_day = get_standard_day_name(line)
+            if detected_day:
+                current_day = detected_day
+                if current_day not in temp_schedule: temp_schedule[current_day] = []
+                continue # Це був рядок з днем, йдемо далі
+            
+            # 2. Шукаємо номер пари
+            # Гнучкий Regex: початок рядка, цифра 1-9, опціонально крапка/дужка
+            # Приклади: "1", "2.", "3)", "4 пара"
+            pair_match = re.match(r'^([1-9])[\.\)\s]?', line)
+            
+            if current_day and pair_match:
+                pair_num = pair_match.group(1) # Беремо тільки цифру
+                # Якщо в цьому ж рядку є текст пари (напр. "1 Математика")
+                text_part = line[len(pair_match.group(0)):].strip()
+                
+                temp_schedule[current_day].append({'num': pair_num, 'text': text_part})
+                continue
+
+            # 3. Текст пари (продовження)
+            if current_day and current_day in temp_schedule and temp_schedule[current_day]:
+                last_pair = temp_schedule[current_day][-1]
+                # Додаємо текст до попередньої пари
+                last_pair['text'] += ("\n" if last_pair['text'] else "") + line
+
+        # Формуємо фінальний словник
+        for day, pairs in temp_schedule.items():
+            day_text = f"📅 <b>{day}</b> ({html.escape(group_name)})\n\n"
+            has_pairs_in_day = False
+            for pair in pairs:
+                full_text = pair['text']
+                if is_pair_for_excluded_subgroup(full_text, subgroup): continue
+                
+                # При текстовому парсингу ми не знаємо тижнів (чисельник/знаменник), тому показуємо все
+                safe_text = html.escape(full_text)
+                day_text += f"⏰ <b>{pair['num']} пара</b>\n📖 {safe_text}\n──────────────\n"
+                has_pairs_in_day = True
+            
+            if has_pairs_in_day:
+                schedule_data[day] = day_text
+
+    if not schedule_data:
+        return {"Info": "📭 Розклад порожній (або вихідні)."}
+
+    return schedule_data
 
