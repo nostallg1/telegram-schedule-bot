@@ -88,8 +88,7 @@ async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_pa
                 wk = week_param if week_param else 'all'
                 sb = sub_param if sub_param else 'all'
                 
-                # ВИПРАВЛЕННЯ: Використовуємо short ("Пн") замість day_name[:2] ("По")
-                callback = f"fd_{short}_{group}_{sb}_{wk}"
+                callback = f"fd_{day_name[:2]}_{group}_{sb}_{wk}"
                 row.append(InlineKeyboardButton(short, callback_data=callback))
             if len(row) == 3:
                 keyboard.append(row)
@@ -156,21 +155,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data.startswith("fd_"):
         try:
             parts = data.split("_")
-            day_short = parts[1] # Тепер тут буде "Пн", а не "По"
+            day_short = parts[1]
             group = parts[2]
             sub_raw = parts[3]
             week_raw = parts[4]
 
             sub_param = sub_raw if sub_raw != "all" else None
             week_param = week_raw if week_raw != "all" else None
-            
-            # Шукаємо повну назву дня за скороченням
             day_full = next((k for k, v in DAY_SHORT_NAMES.items() if v == day_short), None)
             
             cache = SCHEDULE_CACHE.get(chat_id)
             if cache and cache.get('group') == group and str(cache.get('sub')) == str(sub_param) and str(cache.get('week')) == str(week_param):
                 text = cache['data'].get(day_full, "Немає пар.")
-                # Відновлюємо callback для кнопки "Назад"
                 back_cb = f"back_days_{group}_{sub_raw}_{week_raw}"
                 kb = [[InlineKeyboardButton("🔙 До днів тижня", callback_data=back_cb)]]
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -208,7 +204,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             for day_name in TARGET_DAYS:
                 if day_name in cache['data']:
                     short = DAY_SHORT_NAMES.get(day_name, day_name)
-                    callback = f"fd_{short}_{group}_{sub_raw}_{week_raw}" # Тут теж виправлено на short
+                    callback = f"fd_{day_name[:2]}_{group}_{sub_raw}_{week_raw}"
                     row.append(InlineKeyboardButton(short, callback_data=callback))
                 if len(row) == 3:
                     keyboard.append(row)
@@ -248,27 +244,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ]
         await query.edit_message_text(f"🎓 Група: <b>{group}</b>\nОберіть підгрупу:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-def run_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# --- FIX: РУЧНИЙ ЗАПУСК БОТА ---
+async def start_bot_manual():
     TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-    if not TELEGRAM_TOKEN: return
-    try:
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("rozklad", get_rozklad))
-        app.add_handler(CommandHandler("info", info))
-        app.add_handler(CommandHandler("support", support))
-        app.add_handler(CallbackQueryHandler(button_handler))
-        loop.run_until_complete(app.run_polling(stop_signals=None))
-    except Exception as e: logger.error(f"Bot crashed: {e}")
-    finally: loop.close()
+    if not TELEGRAM_TOKEN:
+        logger.error("❌ NO TOKEN")
+        return
 
-if __name__ == '__main__':
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Додаємо хендлери
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("rozklad", get_rozklad))
+    application.add_handler(CommandHandler("info", info))
+    application.add_handler(CommandHandler("support", support))
+    application.add_handler(CallbackQueryHandler(button_handler))
 
-
+    # Ручна ініціалізація та запуск
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling() # Запускаємо отримання оновлень
+    
+    logger.info("🚀 Бот успішно запущено (Manual Mode)!")
