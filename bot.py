@@ -142,6 +142,31 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_home(update, context)  # завжди повертаємо користувача до кнопок
     # у групових чатах на сторонні повідомлення не реагуємо
 
+# --- ТИЖНІ: поточний / наступний / всі ---
+# Сайт підсвічує (week_color) пари поточного тижня, тому вибір тижня - "Поточний" / "Наступний" / "Всі".
+WEEK_LABELS = {"cur": "Поточний тиждень", "next": "Наступний тиждень"}
+LEGACY_WEEKS = ("chys", "znam")   # старі кнопки "Чисельник/Знаменник" у вже надісланих повідомленнях
+
+def week_label(week_raw):
+    return WEEK_LABELS.get(week_raw, "Всі тижні")
+
+def sub_label(sub_raw):
+    return f"підгр. {sub_raw}" if sub_raw != "all" else "Вся група"
+
+def week_menu_text(group, sub_choice):
+    return f"🎓 <b>{group}</b> ({sub_label(sub_choice)})\n📅 Оберіть тиждень:"
+
+def week_keyboard(sub_choice, group):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📗 Поточний тиждень", callback_data=f"week_cur_{sub_choice}_{group}")],
+        [InlineKeyboardButton("📘 Наступний тиждень", callback_data=f"week_next_{sub_choice}_{group}")],
+        [InlineKeyboardButton("🗓 Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")],
+        [InlineKeyboardButton("🔙 Змінити підгрупу", callback_data=f"back_to_subs_{group}")],
+    ])
+
+async def show_week_menu(query, sub_choice, group):
+    await query.edit_message_text(week_menu_text(group, sub_choice), reply_markup=week_keyboard(sub_choice, group), parse_mode='HTML')
+
 # --- LOAD LOGIC ---
 async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=False):
     chat_id = query.message.chat_id
@@ -155,11 +180,10 @@ async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_pa
         if not schedule_data or "Info" in schedule_data:
             msg = schedule_data.get("Info", "❌ Помилка.") if schedule_data else "❌ Помилка."
             kb = [[InlineKeyboardButton("🔙 Спробувати іншу групу", callback_data="restart_full")]]
+            if week_param:
+                kb.insert(0, [InlineKeyboardButton("🔙 Змінити тиждень", callback_data=f"back_to_weeks_{sub_param if sub_param else 'all'}_{group}")])
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             return
-
-        # Службовий прапорець з парсера: на сайті немає позначок чисельник/знаменник
-        week_unmarked = bool(schedule_data.pop("_week_unmarked", False))
 
         SCHEDULE_CACHE[chat_id] = {
             'data': schedule_data, 'group': group,
@@ -188,9 +212,8 @@ async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_pa
              await query.edit_message_text(f"📭 Розклад для <b>{group}</b> ({sub_name}, {week_name}) порожній.", parse_mode='HTML')
              return
 
-        note = "\nℹ️ <i>Не вдалося визначити чисельник/знаменник для цієї групи, тому показано всі пари.</i>" if (week_unmarked and week_param) else ""
         await query.edit_message_text(
-            f"✅ <b>{group}</b> ({sub_name}, {week_name}){note}\nОберіть день:",
+            f"✅ <b>{group}</b> ({sub_name}, {week_name})\nОберіть день:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
         )
@@ -213,14 +236,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data.startswith("sub_"):
         try:
             _, sub_choice, group = data.split("_", 2)
-            keyboard = [
-                [InlineKeyboardButton("numerator (Чисельник)", callback_data=f"week_chys_{sub_choice}_{group}")],
-                [InlineKeyboardButton("denominator (Знаменник)", callback_data=f"week_znam_{sub_choice}_{group}")],
-                [InlineKeyboardButton("Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")]
-            ]
-            keyboard.append([InlineKeyboardButton("🔙 Змінити підгрупу", callback_data=f"back_to_subs_{group}")])
-            sub_name = f"підгр. {sub_choice}" if sub_choice != "all" else "Вся група"
-            await query.edit_message_text(f"🎓 <b>{group}</b> ({sub_name})\n📅 Оберіть тиждень:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+            await show_week_menu(query, sub_choice, group)
         except ValueError: await query.edit_message_text("⚠️ Помилка.")
         return
 
@@ -231,12 +247,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             sub_choice = parts[2]
             group = parts[3]
 
-            sub_param = sub_choice if sub_choice in ["1", "2"] else None
-            sub_name = f"підгр. {sub_choice}" if sub_choice != "all" else "Вся група"
-            week_param = week_choice if week_choice in ["chys", "znam"] else None
-            week_name = "Чисельник" if week_choice == "chys" else ("Знаменник" if week_choice == "znam" else "Всі тижні")
+            if week_choice in LEGACY_WEEKS:      # стара кнопка "Чисельник/Знаменник" -> показуємо нове меню
+                await show_week_menu(query, sub_choice, group)
+                return
 
-            await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name)
+            sub_param = sub_choice if sub_choice in ["1", "2"] else None
+            week_param = week_choice if week_choice in WEEK_LABELS else None
+
+            await load_schedule_and_show_days(query, group, sub_param, sub_label(sub_choice), week_param, week_label(week_choice))
         except Exception as e: 
             logger.error(e)
             await query.edit_message_text("⚠️ Помилка.")
@@ -249,6 +267,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             group = parts[2]
             sub_raw = parts[3]
             week_raw = parts[4]
+
+            if week_raw in LEGACY_WEEKS:         # стара кнопка з чисельником/знаменником
+                await show_week_menu(query, sub_raw, group)
+                return
 
             sub_param = sub_raw if sub_raw != "all" else None
             week_param = week_raw if week_raw != "all" else None
@@ -264,11 +286,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
                 return
             
-            sub_name = f"підгр. {sub_raw}" if sub_raw != "all" else "Вся група"
-            week_name = "Чисельник" if week_raw == "chys" else ("Знаменник" if week_raw == "znam" else "Всі тижні")
-            
             await query.edit_message_text(f"⚠️ Оновлюю...", parse_mode='HTML')
-            await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=True)
+            await load_schedule_and_show_days(query, group, sub_param, sub_label(sub_raw), week_param, week_label(week_raw), retry=True)
 
         except Exception as e:
             # Подвійний тап на ту саму кнопку дає "Message is not modified" - це не помилка
@@ -284,7 +303,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             group = parts[2]
             sub_raw = parts[3]
             week_raw = parts[4]
-            
+
+            if week_raw in LEGACY_WEEKS:         # стара кнопка з чисельником/знаменником
+                await show_week_menu(query, sub_raw, group)
+                return
+
             sub_param = sub_raw if sub_raw != "all" else None
             week_param = week_raw if week_raw != "all" else None
             cache = SCHEDULE_CACHE.get(chat_id)
@@ -293,9 +316,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             cache_ok = bool(cache) and cache.get('group') == group \
                 and str(cache.get('sub')) == str(sub_param) and str(cache.get('week')) == str(week_param)
             if not cache_ok:
-                 sub_name = f"підгр. {sub_raw}" if sub_raw != "all" else "Вся група"
-                 week_name = "Чисельник" if week_raw == "chys" else ("Знаменник" if week_raw == "znam" else "Всі тижні")
-                 await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=True)
+                 await load_schedule_and_show_days(query, group, sub_param, sub_label(sub_raw), week_param, week_label(week_raw), retry=True)
                  return
 
             keyboard = []
@@ -323,14 +344,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parts = data.split("_")
             sub_choice = parts[3]
             group = parts[4]
-            
-            keyboard = [
-                [InlineKeyboardButton("numerator (Чисельник)", callback_data=f"week_chys_{sub_choice}_{group}")],
-                [InlineKeyboardButton("denominator (Знаменник)", callback_data=f"week_znam_{sub_choice}_{group}")],
-                [InlineKeyboardButton("Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")]
-            ]
-            keyboard.append([InlineKeyboardButton("🔙 Змінити підгрупу", callback_data=f"back_to_subs_{group}")])
-            await query.edit_message_text("📅 Оберіть тиждень:", reply_markup=InlineKeyboardMarkup(keyboard))
+            await show_week_menu(query, sub_choice, group)
         except Exception as e: logger.error(e)
         return
 
