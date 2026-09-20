@@ -188,7 +188,7 @@ async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_pa
              await query.edit_message_text(f"📭 Розклад для <b>{group}</b> ({sub_name}, {week_name}) порожній.", parse_mode='HTML')
              return
 
-        note = "\nℹ️ <i>Сайт не позначає чисельник/знаменник для цієї групи, тому показано всі пари.</i>" if (week_unmarked and week_param) else ""
+        note = "\nℹ️ <i>Не вдалося визначити чисельник/знаменник для цієї групи, тому показано всі пари.</i>" if (week_unmarked and week_param) else ""
         await query.edit_message_text(
             f"✅ <b>{group}</b> ({sub_name}, {week_name}){note}\nОберіть день:",
             reply_markup=InlineKeyboardMarkup(keyboard),
