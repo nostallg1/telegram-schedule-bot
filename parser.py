@@ -32,6 +32,66 @@ def get_standard_day_name(line):
                 return standard_name
     return None
 
+# --- ВИЗНАЧЕННЯ ТИЖНЯ (чисельник / знаменник) ---
+# Сайт НЕ приймає тип тижня як параметр запиту (форма має лише група / семестр / половина семестру),
+# тому завжди приходять обидва тижні разом, а фільтруємо ми їх самі за позначками в HTML.
+_CHYS_PREFIXES = ("chys", "chis", "numer", "чис")
+_ZNAM_PREFIXES = ("znam", "denom", "знам")
+_CHYS_EXACT = {"week_1", "week-1", "week1", "odd"}
+_ZNAM_EXACT = {"week_2", "week-2", "week2", "even"}
+# Текстові позначки. Свідомо суворі, щоб не зачепити назви предметів на кшталт "Чисельні методи".
+_TEXT_CHYS = re.compile(r'(?<![а-яіїєґ])(чис\.|чисельник)(?![а-яіїєґ])', re.IGNORECASE)
+_TEXT_ZNAM = re.compile(r'(?<![а-яіїєґ])(знам\.|знаменник)(?![а-яіїєґ])', re.IGNORECASE)
+
+def _tokens_week(tokens):
+    """Повертає набір {'chys','znam'} за списком CSS-класів / значень атрибутів."""
+    found = set()
+    for t in tokens:
+        t = str(t).strip().lower()
+        if not t:
+            continue
+        if t.startswith(_CHYS_PREFIXES) or t in _CHYS_EXACT:
+            found.add('chys')
+        if t.startswith(_ZNAM_PREFIXES) or t in _ZNAM_EXACT:
+            found.add('znam')
+    return found
+
+def _element_tokens(el):
+    tokens = list(el.get('class', []) or [])
+    for attr in ('data-week', 'week'):
+        val = el.get(attr)
+        if val:
+            tokens.extend(re.split(r'[\s,;]+', str(val)))
+    return tokens
+
+def _text_week(text):
+    found = set()
+    if _TEXT_CHYS.search(text): found.add('chys')
+    if _TEXT_ZNAM.search(text): found.add('znam')
+    return found
+
+def detect_week(row, boundary, text=""):
+    """
+    'chys' / 'znam' / None (None = пара стоїть в обох тижнях або позначки немає).
+    Дивимось: клас самого рядка, його батьків (до блоку дня), усіх вкладених елементів, а потім текст.
+    """
+    found = set(_tokens_week(_element_tokens(row)))
+    for parent in row.parents:
+        if parent is boundary or parent is None or parent.name in (None, '[document]'):
+            break
+        found |= _tokens_week(_element_tokens(parent))
+    for child in row.find_all(True):
+        found |= _tokens_week(_element_tokens(child))
+    if not found:
+        found = _text_week(text)
+    return next(iter(found)) if len(found) == 1 else None
+
+def week_excluded(row_week, week_filter):
+    """Чи треба сховати пару при вибраному фільтрі тижня."""
+    if not week_filter or not row_week:
+        return False
+    return row_week != week_filter
+
 # --- ЗАПИТ ---
 def make_request(group_name, semester, duration):
     schedule_url = f"{BASE_URL}/students_schedule"
@@ -105,15 +165,14 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
                 if not re.search(f"\({our_sub}\)", text_lower): return True 
         return False
 
-    # --- Фільтр тижнів ---
-    def is_excluded_week(classes_list, current_filter):
-        if not current_filter: return False
-        cls = set(classes_list)
-        is_chys = 'chys' in cls or 'week_1' in cls
-        is_znam = 'znam' in cls or 'week_2' in cls
-        if current_filter == 'chys' and is_znam and not is_chys: return True
-        if current_filter == 'znam' and is_chys and not is_znam: return True
-        return False
+    # Статистика для діагностики: скільки пар мають позначку тижня
+    stats = {'rows': 0, 'chys': 0, 'znam': 0, 'none': 0, 'samples': []}
+
+    def count_row(row_week, sample):
+        stats['rows'] += 1
+        stats[row_week or 'none'] += 1
+        if len(stats['samples']) < 4:
+            stats['samples'].append(sample)
 
     # === ВАРІАНТ 1: HTML ===
     days = content_div.find_all('div', class_='view-grouping')
@@ -129,20 +188,21 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
             
             rows = day_block.find_all('div', class_='stud_schedule')
             for row in rows:
-                if is_excluded_week(row.get('class', []), week_filter): continue
-
-                num_header = row.find_previous('h3')
-                pair_num = num_header.get_text(strip=True) if num_header else "?"
-                
                 content = row.find('div', class_='group_content')
                 if not content: content = row
                 full_pair_text = content.get_text(separator=" ", strip=True).strip()
 
+                row_week = detect_week(row, day_block, full_pair_text)
+                count_row(row_week, {'classes': row.get('class', []), 'week': row_week, 'text': full_pair_text[:40]})
+                if week_excluded(row_week, week_filter): continue
+
+                num_header = row.find_previous('h3')
+                pair_num = num_header.get_text(strip=True) if num_header else "?"
+
                 if is_excluded_subgroup(full_pair_text, subgroup): continue
-                
+
                 safe_text = html.escape(full_pair_text)
-                classes = row.get('class', [])
-                week_mark = " <i>(чис.)</i>" if ('chys' in classes or 'week_1' in classes) else (" <i>(знам.)</i>" if ('znam' in classes or 'week_2' in classes) else "")
+                week_mark = " <i>(чис.)</i>" if row_week == 'chys' else (" <i>(знам.)</i>" if row_week == 'znam' else "")
 
                 day_text += f"⏰ <b>{pair_num} пара</b>{week_mark}\n📖 {safe_text}\n──────────────\n"
                 has_pairs = True
@@ -183,8 +243,13 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
             day_text = f"📅 <b>{day}</b> ({html.escape(group_name)})\n\n"
             has = False
             for p in pairs:
+                # Раніше в цьому режимі тиждень взагалі не фільтрувався
+                row_week = next(iter(_text_week(p['text'])), None) if len(_text_week(p['text'])) == 1 else None
+                count_row(row_week, {'classes': [], 'week': row_week, 'text': p['text'][:40]})
+                if week_excluded(row_week, week_filter): continue
                 if is_excluded_subgroup(p['text'], subgroup): continue
-                day_text += f"⏰ <b>{p['num']} пара</b>\n📖 {html.escape(p['text'])}\n──────────────\n"
+                week_mark = " <i>(чис.)</i>" if row_week == 'chys' else (" <i>(знам.)</i>" if row_week == 'znam' else "")
+                day_text += f"⏰ <b>{p['num']} пара</b>{week_mark}\n📖 {html.escape(p['text'])}\n──────────────\n"
                 has = True
             if has: schedule_data[day] = day_text
 
@@ -193,6 +258,16 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
         # Ми повертаємо шматок тексту, щоб побачити, ЩО САМЕ там написано
         raw_preview = content_div.get_text(separator="\n", strip=True)[:400]
         return {"Info": f"📭 Розклад порожній. Ось що бачить бот:\n\n<pre>{html.escape(raw_preview)}</pre>"}
+
+    # Діагностика тижнів (видно в логах хостингу)
+    logger.info(
+        "WEEKS group=%s filter=%s rows=%s чис=%s знам=%s без_позначки=%s зразки=%s",
+        group_name, week_filter, stats['rows'], stats['chys'], stats['znam'], stats['none'], stats['samples']
+    )
+    # Якщо на сторінці немає жодної позначки тижня, фільтр нічого не може змінити.
+    # Повідомляємо про це боту, щоб показати користувачу чесну примітку.
+    if week_filter and stats['rows'] and not (stats['chys'] or stats['znam']):
+        schedule_data["_week_unmarked"] = True
 
     return schedule_data
 

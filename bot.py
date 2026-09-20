@@ -74,8 +74,11 @@ async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_pa
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             return
 
+        # Службовий прапорець з парсера: на сайті немає позначок чисельник/знаменник
+        week_unmarked = bool(schedule_data.pop("_week_unmarked", False))
+
         SCHEDULE_CACHE[chat_id] = {
-            'data': schedule_data, 'group': group, 
+            'data': schedule_data, 'group': group,
             'sub': sub_param, 'sub_n': sub_name,
             'week': week_param, 'week_n': week_name
         }
@@ -95,14 +98,15 @@ async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_pa
                 row = []
         if row: keyboard.append(row)
         
-        keyboard.append([InlineKeyboardButton("🔙 Змінити тиждень", callback_data=f"back_to_weeks_{sub_param}_{group}")])
+        keyboard.append([InlineKeyboardButton("🔙 Змінити тиждень", callback_data=f"back_to_weeks_{sub_param if sub_param else 'all'}_{group}")])
 
         if not keyboard or (len(keyboard) == 1):
              await query.edit_message_text(f"📭 Розклад для <b>{group}</b> ({sub_name}, {week_name}) порожній.", parse_mode='HTML')
              return
 
+        note = "\nℹ️ <i>Сайт не позначає чисельник/знаменник для цієї групи, тому показано всі пари.</i>" if (week_unmarked and week_param) else ""
         await query.edit_message_text(
-            f"✅ <b>{group}</b> ({sub_name}, {week_name})\nОберіть день:",
+            f"✅ <b>{group}</b> ({sub_name}, {week_name}){note}\nОберіть день:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
         )
@@ -195,12 +199,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             sub_raw = parts[3]
             week_raw = parts[4]
             
+            sub_param = sub_raw if sub_raw != "all" else None
+            week_param = week_raw if week_raw != "all" else None
             cache = SCHEDULE_CACHE.get(chat_id)
-            if not cache:
-                 sub_param = sub_raw if sub_raw != "all" else None
+            # Кеш один на чат: використовуємо його лише якщо він саме для цих групи/підгрупи/тижня,
+            # інакше завантажуємо заново (раніше тут міг показатись розклад іншого тижня)
+            cache_ok = bool(cache) and cache.get('group') == group \
+                and str(cache.get('sub')) == str(sub_param) and str(cache.get('week')) == str(week_param)
+            if not cache_ok:
                  sub_name = f"підгр. {sub_raw}" if sub_raw != "all" else "Вся група"
-                 week_param = week_raw if week_raw != "all" else None
-                 week_name = "Тиждень"
+                 week_name = "Чисельник" if week_raw == "chys" else ("Знаменник" if week_raw == "znam" else "Всі тижні")
                  await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=True)
                  return
 
