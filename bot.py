@@ -162,8 +162,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             sub_param = sub_raw if sub_raw != "all" else None
             week_param = week_raw if week_raw != "all" else None
-            day_full = next((k for k, v in DAY_SHORT_NAMES.items() if v == day_short), None)
-            
+            # Кнопки дня кодують назву як перші 2 літери ("По", "Ві", "Се", "Че", "П'"),
+            # тому шукаємо день за цим префіксом (раніше порівнювали з "Пн"/"Вт" і нічого не знаходили)
+            day_full = next((k for k in DAY_SHORT_NAMES if k[:2] == day_short or DAY_SHORT_NAMES[k] == day_short), None)
+
             cache = SCHEDULE_CACHE.get(chat_id)
             if cache and cache.get('group') == group and str(cache.get('sub')) == str(sub_param) and str(cache.get('week')) == str(week_param):
                 text = cache['data'].get(day_full, "Немає пар.")
@@ -179,7 +181,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=True)
 
         except Exception as e:
-            logger.error(f"FD Error: {e}")
+            # Подвійний тап на ту саму кнопку дає "Message is not modified" - це не помилка
+            if "not modified" in str(e).lower():
+                return
+            logger.exception(f"FD Error: {e}")  # повний traceback у логах хостингу
             await query.edit_message_text("⚠️ Помилка даних.")
         return
 
