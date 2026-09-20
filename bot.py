@@ -244,25 +244,52 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ]
         await query.edit_message_text(f"🎓 Група: <b>{group}</b>\nОберіть підгрупу:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-# --- FIX: РУЧНИЙ ЗАПУСК БОТА ---
-async def start_bot_manual():
-    TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-    if not TELEGRAM_TOKEN:
-        logger.error("❌ NO TOKEN")
-        return
+# --- ЗБІРКА ЗАСТОСУНКУ ---
+def build_application(token):
+    application = Application.builder().token(token).build()
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
     # Додаємо хендлери
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("rozklad", get_rozklad))
     application.add_handler(CommandHandler("info", info))
     application.add_handler(CommandHandler("support", support))
     application.add_handler(CallbackQueryHandler(button_handler))
+    return application
+
+# --- FIX: РУЧНИЙ ЗАПУСК БОТА (залишено для сумісності) ---
+async def start_bot_manual():
+    TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+    if not TELEGRAM_TOKEN:
+        logger.error("❌ NO TOKEN")
+        return
+
+    application = build_application(TELEGRAM_TOKEN)
 
     # Ручна ініціалізація та запуск
     await application.initialize()
     await application.start()
     await application.updater.start_polling() # Запускаємо отримання оновлень
-    
+
     logger.info("🚀 Бот успішно запущено (Manual Mode)!")
+
+# --- ТОЧКА ВХОДУ (запуск на сервері: python bot.py) ---
+def run_web_server():
+    # Хостинги типу Render/Railway задають PORT і чекають, що застосунок слухає цей порт.
+    # Також /health можна пінгувати (UptimeRobot), щоб безкоштовний сервіс не "засинав".
+    port = int(os.environ.get("PORT", "8080"))
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+if __name__ == "__main__":
+    token = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        raise SystemExit("❌ Не задано змінну середовища TELEGRAM_TOKEN")
+
+    # Flask запускаємо лише якщо хостинг дав PORT (на VPS/локально він не потрібен)
+    if os.environ.get("PORT"):
+        threading.Thread(target=run_web_server, daemon=True).start()
+
+    application = build_application(token)
+    logger.info("🚀 Бот запускається...")
+    # run_polling блокує процес, сам обробляє SIGTERM/SIGINT і тримає бота живим
+    application.run_polling(drop_pending_updates=True)
