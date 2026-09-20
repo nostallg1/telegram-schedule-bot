@@ -1,9 +1,12 @@
 import logging
 import os
+import re
+import sqlite3
 import threading
 import asyncio
+from contextlib import closing
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from parser import fetch_schedule_dict
 
 # --- FLASK ---
@@ -17,7 +20,7 @@ def health(): return "OK"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-USER_GROUPS = {} 
+# Групи користувачів зберігаються в SQLite (див. блок db_* нижче) 
 SCHEDULE_CACHE = {}
 TARGET_DAYS = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця"]
 DAY_SHORT_NAMES = {"Понеділок": "Пн", "Вівторок": "Вт", "Середа": "Ср", "Четвер": "Чт", "П'ятниця": "Пт"}
@@ -31,32 +34,113 @@ def fix_layout(text):
         text = text.replace(lat, cyr)
     return text
 
-# --- КОМАНДИ ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = "👋 <b>Привіт! Я бот розкладу ЛП.</b>\n\nВведіть команду:\n👉 <code>/rozklad АВ-11</code>\n🛠 /support - підтримка"
-    await update.message.reply_text(text, parse_mode='HTML')
+# --- SQLITE: ЗБЕРЕЖЕННЯ ГРУПИ КОРИСТУВАЧА ---
+# Шлях до файлу можна змінити змінною середовища DB_PATH (наприклад, на підключений постійний диск).
+DB_PATH = os.environ.get("DB_PATH", "users.db")
 
-async def get_rozklad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    args = context.args
-    group = "АВ-11"
-    if len(args) > 0:
-        group = fix_layout(args[0])
-    
-    USER_GROUPS[chat_id] = group
+def _db():
+    return closing(sqlite3.connect(DB_PATH))
 
-    keyboard = [
+def db_init():
+    folder = os.path.dirname(DB_PATH)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    with _db() as conn, conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, group_name TEXT NOT NULL)")
+
+def db_get_group(chat_id):
+    with _db() as conn:
+        row = conn.execute("SELECT group_name FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+    return row[0] if row else None
+
+def db_set_group(chat_id, group):
+    with _db() as conn, conn:
+        conn.execute(
+            "INSERT INTO users (chat_id, group_name) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET group_name = excluded.group_name",
+            (chat_id, group),
+        )
+
+# --- ВАЛІДАЦІЯ НАЗВИ ГРУПИ ---
+# Літери + (необов'язковий дефіс) + цифри + короткий суфікс, напр. АВ-11, КН-101, ІТ-12с.
+# Без "_" (він розділяє частини callback_data) і не довше 16 символів (ліміт callback_data - 64 байти).
+GROUP_RE = re.compile(r"^[^\W\d_]{1,10}-?\d{1,4}(?:[^\W_]|[-.]){0,8}$")
+
+def is_valid_group(group):
+    return bool(group) and len(group) <= 16 and bool(GROUP_RE.match(group))
+
+# --- КЛАВІАТУРИ ---
+def subgroup_text(group):
+    return f"🎓 Група: <b>{group}</b>\nОберіть підгрупу:"
+
+def subgroup_keyboard(group):
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("👤 1 підгрупа", callback_data=f"sub_1_{group}"),
          InlineKeyboardButton("👤 2 підгрупа", callback_data=f"sub_2_{group}")],
-        [InlineKeyboardButton("👥 Вся група", callback_data=f"sub_all_{group}")]
-    ]
-    await update.message.reply_text(f"🎓 Група: <b>{group}</b>\nОберіть підгрупу:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        [InlineKeyboardButton("👥 Вся група", callback_data=f"sub_all_{group}")],
+        [InlineKeyboardButton("🔄 Змінити групу", callback_data="change_group")],
+    ])
+
+PROMPT_GROUP_TEXT = "👋 Привіт! Напишіть назву вашої групи (наприклад, <code>АВ-11</code>):"
+
+# --- ГОЛОВНИЙ ЕКРАН ---
+async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Є збережена група -> меню підгруп. Немає -> просимо написати назву групи."""
+    chat_id = update.effective_chat.id
+    group = db_get_group(chat_id)
+    if group:
+        context.user_data.pop('awaiting_group', None)
+        await update.effective_message.reply_text(
+            subgroup_text(group), reply_markup=subgroup_keyboard(group), parse_mode='HTML')
+    else:
+        context.user_data['awaiting_group'] = True
+        await update.effective_message.reply_text(PROMPT_GROUP_TEXT, parse_mode='HTML')
+
+async def save_group_and_show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, group: str) -> None:
+    chat_id = update.effective_chat.id
+    db_set_group(chat_id, group)
+    SCHEDULE_CACHE.pop(chat_id, None)  # старий кеш розкладу вже не актуальний
+    context.user_data.pop('awaiting_group', None)
+    await update.effective_message.reply_text(
+        subgroup_text(group), reply_markup=subgroup_keyboard(group), parse_mode='HTML')
+
+# --- КОМАНДИ ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await send_home(update, context)
+
+# Старі команди залишені як "приховані" (не рекламуються в інтерфейсі), щоб нічого не зламати.
+async def get_rozklad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.args:
+        group = fix_layout(context.args[0])
+        if is_valid_group(group):
+            await save_group_and_show_menu(update, context, group)
+            return
+    await send_home(update, context)
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("ℹ️ Бот парсить дані з student.lpnu.ua")
 
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🛠 Підтримка: <code>4441111131351441</code>", parse_mode='HTML')
+
+# --- ТЕКСТОВЕ ПОВІДОМЛЕННЯ = НАЗВА ГРУПИ ---
+async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.text:
+        return
+
+    group = fix_layout(message.text.strip())
+    if is_valid_group(group):
+        await save_group_and_show_menu(update, context, group)
+        return
+
+    # Текст не схожий на групу
+    if context.user_data.get('awaiting_group'):
+        await message.reply_text(
+            "❓ Не схоже на назву групи. Напишіть її, наприклад, <code>АВ-11</code>:", parse_mode='HTML')
+    elif update.effective_chat.type == "private":
+        await send_home(update, context)  # завжди повертаємо користувача до кнопок
+    # у групових чатах на сторонні повідомлення не реагуємо
 
 # --- LOAD LOGIC ---
 async def load_schedule_and_show_days(query, group, sub_param, sub_name, week_param, week_name, retry=False):
@@ -121,8 +205,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data
     await query.answer()
 
-    if data == "restart_full":
-        await query.edit_message_text("Введіть команду `/rozklad ГРУПА` ще раз.", parse_mode='Markdown')
+    if data in ("change_group", "restart_full"):
+        context.user_data['awaiting_group'] = True
+        await query.edit_message_text("✏️ Надішліть нову назву групи:")
         return
 
     if data.startswith("sub_"):
@@ -133,6 +218,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 [InlineKeyboardButton("denominator (Знаменник)", callback_data=f"week_znam_{sub_choice}_{group}")],
                 [InlineKeyboardButton("Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")]
             ]
+            keyboard.append([InlineKeyboardButton("🔙 Змінити підгрупу", callback_data=f"back_to_subs_{group}")])
             sub_name = f"підгр. {sub_choice}" if sub_choice != "all" else "Вся група"
             await query.edit_message_text(f"🎓 <b>{group}</b> ({sub_name})\n📅 Оберіть тиждень:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         except ValueError: await query.edit_message_text("⚠️ Помилка.")
@@ -250,15 +336,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data.startswith("back_to_subs_"):
         group = data.split("_")[3]
-        kb = [
-            [InlineKeyboardButton("👤 1 підгрупа", callback_data=f"sub_1_{group}"),
-             InlineKeyboardButton("👤 2 підгрупа", callback_data=f"sub_2_{group}")],
-            [InlineKeyboardButton("👥 Вся група", callback_data=f"sub_all_{group}")]
-        ]
-        await query.edit_message_text(f"🎓 Група: <b>{group}</b>\nОберіть підгрупу:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await query.edit_message_text(subgroup_text(group), reply_markup=subgroup_keyboard(group), parse_mode='HTML')
 
 # --- ЗБІРКА ЗАСТОСУНКУ ---
 def build_application(token):
+    db_init()
     application = Application.builder().token(token).build()
 
     # Додаємо хендлери
@@ -267,6 +349,8 @@ def build_application(token):
     application.add_handler(CommandHandler("info", info))
     application.add_handler(CommandHandler("support", support))
     application.add_handler(CallbackQueryHandler(button_handler))
+    # Будь-який звичайний текст (не команда) сприймаємо як назву групи
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_text_handler))
     return application
 
 # --- FIX: РУЧНИЙ ЗАПУСК БОТА (залишено для сумісності) ---
