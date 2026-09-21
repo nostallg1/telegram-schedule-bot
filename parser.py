@@ -33,26 +33,26 @@ def get_standard_day_name(line):
     return None
 
 # =====================================================================
-# ТИЖНІ: поточний / наступний (за класом week_color)
+# ТИЖНІ: чисельник / знаменник (за позицією в клітинці розкладу)
 # =====================================================================
-# Сайт не приймає тип тижня в запиті і НЕ підписує тижні словами "чисельник/знаменник" усередині карток.
-# Зате пари ПОТОЧНОГО тижня підсвічені (зелений блок):
-#     <div id="group_full" class="week_color"> ... </div>
-# Пари іншого (альтернативного = наступного) тижня цього класу не мають.
+# Структура розкладу ЛП: кожна клітинка (слот "N пара") має верхню і нижню частини:
+#   * ВЕРХНЯ частина = чисельник (chys), НИЖНЯ = знаменник (znam);
+#   * пара на всю клітинку (без поділу) = щотижня (full).
+# Клас week_color - лише зелене підсвічування того, що відбувається зараз. Він НЕ визначає, чисельник це
+# чи знаменник, тому парсер працює і без нього (вихідні, канікули, оновлення сайту).
 #
-# Тому вибір тижня в боті: "Поточний" (cur), "Наступний" (next) або "Всі тижні" (None).
-# Правила для кожної пари (слот = один заголовок "N пара"):
-#   * слот має і підсвічену, і непідсвічену пару (розділена картка: верх/низ) -> підсвічена = cur, інша = next
-#   * підсвічена пара сама в слоті   -> щотижня (видно і в "Поточному", і в "Наступному")
-#   * непідсвічена пара сама в слоті -> лише альтернативний тиждень (next)
-# Для "Поточного" і "Наступного" тижня НІКОЛИ не показуємо все підряд: якщо на сторінці немає жодної
-# підсвіченої пари, повертаємо чітке повідомлення (Info), а не всі пари.
+# Як визначаємо тип пари:
+#   1) явна позначка блоку в id/class: group_chys / group_znam / group_full, sub_1_chys ... (найнадійніше);
+#   2) інакше за позицією у слоті: 2 блоки = верх (чисельник) + низ (знаменник); 1 блок = щотижня.
+#      Якщо підсвічені ОБИДВА блоки - це не верх/низ, а дві пари одного тижня, тому щотижня.
+# Позицію визначаємо ДО фільтра підгрупи, щоб пара не "перепливла" з верхньої половини на всю клітинку.
 
 WEEK_COLOR_CLASS = "week_color"
-WEEK_FILTERS = ("cur", "next")
-NO_HIGHLIGHT_MSG = ("📭 На сайті зараз немає підсвіченого (поточного) тижня, тому розділити тижні неможливо. "
-                    "Оберіть «Всі тижні».")
+WEEK_FILTERS = ("chys", "znam")
 EMPTY_MSG = "📭 Для вибраних підгрупи та тижня пар не знайдено."
+
+_TYPE_ID_RE = re.compile(r'(?:^|[_\-])(chys|znam|full)$', re.IGNORECASE)
+_TYPE_CLASS_RE = re.compile(r'(?:^|[_\-])(chys|znam)$', re.IGNORECASE)
 
 def _has_class(el, name):
     return name in (el.get('class') or [])
@@ -60,10 +60,27 @@ def _has_class(el, name):
 def _is_inside(node, container):
     return any(p is container for p in node.parents)
 
+def _block_type(el):
+    """'chys' | 'znam' | 'full' | None за id/class блоку (group_chys, group_znam, group_full, sub_1_chys ...)."""
+    m = _TYPE_ID_RE.search(el.get('id') or '')
+    if m:
+        return m.group(1).lower()
+    for c in el.get('class') or []:
+        m = _TYPE_CLASS_RE.search(c)
+        if m:
+            return m.group(1).lower()
+    return None
+
+def typed_blocks(row):
+    """Зовнішні блоки рядка з явною позначкою типу тижня."""
+    cands = [el for el in [row, *row.find_all(True)] if _block_type(el)]
+    return [b for b in cands if not any(o is not b and _is_inside(b, o) for o in cands)]
+
 def lesson_units(row):
     """
-    Окремі пари всередині одного рядка. Розділена картка (верхня/нижня половина) - це кілька блоків
-    в одному рядку: беремо кожен блок окремо. Якщо блок один, одиницею є сам рядок.
+    Блоки пар всередині рядка, коли явних позначок немає. Розділена картка (верхня/нижня половина) - це
+    кілька блоків в одному рядку: беремо кожен окремо (навіть порожній, щоб не збилась позиція).
+    Якщо блок один, одиницею є сам рядок.
     """
     contents = row.find_all('div', class_='group_content')
     if len(contents) >= 2:
@@ -76,8 +93,8 @@ def lesson_units(row):
 
 def is_current_week(unit, all_units, boundary):
     """
-    True, якщо пара підсвічена класом week_color: на самому блоці, всередині нього
-    або на обгортці, яка містить лише цю пару (обгортка, спільна з іншими парами, нічого не означає).
+    True, якщо блок підсвічений класом week_color: на самому блоці, всередині нього
+    або на обгортці, яка містить лише цей блок. Використовується тільки як підказка (див. assign_week_types).
     """
     if _has_class(unit, WEEK_COLOR_CLASS) or unit.find(class_=WEEK_COLOR_CLASS) is not None:
         return True
@@ -94,23 +111,23 @@ def _slot_key(unit):
     h3 = unit.find_previous('h3')
     return id(h3) if h3 is not None else None
 
-def assign_weeks(lessons):
-    """Проставляє l['week'] = 'cur' | 'next' | None (None = щотижня)."""
+def assign_week_types(lessons):
+    """Проставляє l['week'] = 'chys' | 'znam' | None (None = щотижня). Порожні половини теж враховуються."""
     slots = {}
     for l in lessons:
         slots.setdefault((l['day'], l['slot']), []).append(l)
     for group in slots.values():
-        mixed = any(l['current'] for l in group) and any(not l['current'] for l in group)
-        for l in group:
-            if not l['current']:
-                l['week'] = 'next'
-            elif mixed:
-                l['week'] = 'cur'
-            else:
+        if any(l['kind'] for l in group):                      # 1) явні позначки id/class
+            for l in group:
+                l['week'] = l['kind'] if l['kind'] in WEEK_FILTERS else None
+        elif len(group) == 2 and not (group[0]['current'] and group[1]['current']):
+            group[0]['week'], group[1]['week'] = 'chys', 'znam'   # 2) верх = чисельник, низ = знаменник
+        else:                                                    # на всю клітинку (або незрозуміло) = щотижня
+            for l in group:
                 l['week'] = None
 
 def week_excluded(lesson_week, week_filter):
-    """Чи треба сховати пару при вибраному тижні."""
+    """Чи треба сховати пару при вибраному тижні (пари "щотижня" видно завжди)."""
     if week_filter not in WEEK_FILTERS or not lesson_week:
         return False
     return lesson_week != week_filter
@@ -201,7 +218,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
     # === ВАРІАНТ 1: HTML ===
     days = content_div.find_all('div', class_='view-grouping')
     if days:
-        # Крок 1: збираємо всі пари сторінки з ознакою "підсвічена (week_color)"
+        # Крок 1: збираємо всі блоки пар (разом з порожніми половинами, щоб позиція верх/низ була точною)
         lessons = []
         for day_block in days:
             header = day_block.find('span', class_='view-grouping-header')
@@ -209,41 +226,44 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
             day_name = get_standard_day_name(raw_day)
             if not day_name: continue
 
-            units = [(row, u) for row in day_block.find_all('div', class_='stud_schedule') for u in lesson_units(row)]
-            unit_els = [u for _, u in units]
-            for row, unit in units:
+            units = []
+            for row in day_block.find_all('div', class_='stud_schedule'):
+                blocks = typed_blocks(row)
+                if blocks:
+                    units.extend((row, b, _block_type(b)) for b in blocks)
+                else:
+                    units.extend((row, u, None) for u in lesson_units(row))
+            unit_els = [u for _, u, _ in units]
+
+            for row, unit, kind in units:
                 content = unit
                 if unit is row:
                     content = row.find('div', class_='group_content') or row
-                text = content.get_text(separator=" ", strip=True).strip()
-                if not text:
-                    continue    # порожня половина картки
                 num_header = unit.find_previous('h3')
                 lessons.append({
                     'day': day_name,
                     'slot': _slot_key(unit),
                     'num': num_header.get_text(strip=True) if num_header else "?",
-                    'text': text,
+                    'text': content.get_text(separator=" ", strip=True).strip(),
+                    'kind': kind,
                     'current': is_current_week(unit, unit_els, day_block),
                     'week': None,
                     'dbg': (_describe(unit), _describe(unit.parent)),
                 })
 
-        html_lessons = len(lessons)
-        page_has_current = any(l['current'] for l in lessons)
-
-        # Крок 2: підгрупа, потім поточний/наступний тиждень (серед пар, які користувач бачить)
-        visible = [l for l in lessons if not is_excluded_subgroup(l['text'], subgroup)]
-        assign_weeks(visible)
+        # Крок 2: тип тижня за структурою клітинки, потім підгрупа
+        assign_week_types(lessons)
+        filled = [l for l in lessons if l['text']]
+        html_lessons = len(filled)
+        visible = [l for l in filled if not is_excluded_subgroup(l['text'], subgroup)]
 
         # Діагностика (видно в логах хостингу)
-        logger.info("WEEKS group=%s filter=%s lessons=%s week_color=%s структура=%s",
-                    group_name, week_filter, len(lessons), sum(l['current'] for l in lessons),
+        logger.info("WEEKS group=%s filter=%s блоків=%s непорожніх=%s режим=%s чис=%s знам=%s щотижня=%s week_color=%s структура=%s",
+                    group_name, week_filter, len(lessons), len(filled),
+                    'id/class' if any(l['kind'] for l in lessons) else 'позиція',
+                    sum(l['week'] == 'chys' for l in filled), sum(l['week'] == 'znam' for l in filled),
+                    sum(l['week'] is None for l in filled), sum(l['current'] for l in lessons),
                     [l['dbg'] for l in lessons[:3]])
-
-        # Без підсвіченої пари тижні не розділити: НЕ показуємо все підряд
-        if week_filter and lessons and not page_has_current:
-            return {"Info": NO_HIGHLIGHT_MSG}
 
         # Крок 3: формуємо текст по днях
         for l in visible:
@@ -251,18 +271,15 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
             day = l['day']
             if day not in schedule_data:
                 schedule_data[day] = f"📅 <b>{day}</b> ({html.escape(group_name)})\n\n"
-            week_mark = ""
-            if week_filter is None and page_has_current:   # у "Всіх тижнях" підписуємо, що чергується
-                week_mark = " <i>(цей тиждень)</i>" if l['week'] == 'cur' else (" <i>(наступний)</i>" if l['week'] == 'next' else "")
+            week_mark = " <i>(чис.)</i>" if l['week'] == 'chys' else (" <i>(знам.)</i>" if l['week'] == 'znam' else "")
             schedule_data[day] += f"⏰ <b>{l['num']} пара</b>{week_mark}\n📖 {html.escape(l['text'])}\n──────────────\n"
 
     # === ВАРІАНТ 2: Текст (Fallback) ===
     # Лише якщо в HTML пар не знайшлось взагалі. Якщо вони були, але фільтр (підгрупа/тиждень) усе сховав,
     # запасний режим запускати не можна: він не вміє фільтрувати тижні й показав би зайве.
     if not schedule_data and not html_lessons:
-        # У текстовому режимі немає week_color, тому тиждень визначити неможливо
-        if week_filter:
-            return {"Info": NO_HIGHLIGHT_MSG}
+        # Текстовий режим: клітинок верх/низ тут немає, тому тижні розділити неможливо.
+        # Не переривамо роботу: показуємо розклад як є (це аварійний режим для нестандартної сторінки).
         raw_text = content_div.get_text(separator="\n", strip=True)
         lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
         current_day = None

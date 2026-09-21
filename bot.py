@@ -142,10 +142,10 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_home(update, context)  # завжди повертаємо користувача до кнопок
     # у групових чатах на сторонні повідомлення не реагуємо
 
-# --- ТИЖНІ: поточний / наступний / всі ---
-# Сайт підсвічує (week_color) пари поточного тижня, тому вибір тижня - "Поточний" / "Наступний" / "Всі".
-WEEK_LABELS = {"cur": "Поточний тиждень", "next": "Наступний тиждень"}
-LEGACY_WEEKS = ("chys", "znam")   # старі кнопки "Чисельник/Знаменник" у вже надісланих повідомленнях
+# --- ТИЖНІ: чисельник / знаменник / всі ---
+# Парсер визначає тиждень за позицією в клітинці розкладу: верх = чисельник, низ = знаменник, на всю клітинку = щотижня.
+WEEK_LABELS = {"chys": "Чисельник", "znam": "Знаменник"}
+LEGACY_WEEKS = ("cur", "next")    # кнопки "Поточний/Наступний тиждень" з проміжної версії, що могли лишитися в чатах
 
 def week_label(week_raw):
     return WEEK_LABELS.get(week_raw, "Всі тижні")
@@ -158,9 +158,9 @@ def week_menu_text(group, sub_choice):
 
 def week_keyboard(sub_choice, group):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📗 Поточний тиждень", callback_data=f"week_cur_{sub_choice}_{group}")],
-        [InlineKeyboardButton("📘 Наступний тиждень", callback_data=f"week_next_{sub_choice}_{group}")],
-        [InlineKeyboardButton("🗓 Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")],
+        [InlineKeyboardButton("numerator (Чисельник)", callback_data=f"week_chys_{sub_choice}_{group}")],
+        [InlineKeyboardButton("denominator (Знаменник)", callback_data=f"week_znam_{sub_choice}_{group}")],
+        [InlineKeyboardButton("Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")],
         [InlineKeyboardButton("🔙 Змінити підгрупу", callback_data=f"back_to_subs_{group}")],
     ])
 
@@ -247,7 +247,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             sub_choice = parts[2]
             group = parts[3]
 
-            if week_choice in LEGACY_WEEKS:      # стара кнопка "Чисельник/Знаменник" -> показуємо нове меню
+            if week_choice in LEGACY_WEEKS:      # кнопка з проміжної версії -> показуємо актуальне меню
                 await show_week_menu(query, sub_choice, group)
                 return
 
@@ -268,7 +268,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             sub_raw = parts[3]
             week_raw = parts[4]
 
-            if week_raw in LEGACY_WEEKS:         # стара кнопка з чисельником/знаменником
+            if week_raw in LEGACY_WEEKS:         # кнопка з проміжної версії
                 await show_week_menu(query, sub_raw, group)
                 return
 
@@ -304,7 +304,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             sub_raw = parts[3]
             week_raw = parts[4]
 
-            if week_raw in LEGACY_WEEKS:         # стара кнопка з чисельником/знаменником
+            if week_raw in LEGACY_WEEKS:         # кнопка з проміжної версії
                 await show_week_menu(query, sub_raw, group)
                 return
 
