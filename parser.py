@@ -33,20 +33,40 @@ def get_standard_day_name(line):
     return None
 
 # =====================================================================
-# ТИЖНІ: чисельник / знаменник / поточний (за позицією в слоті)
+# РОЗМІТКА student.lpnu.ua (перевірено на реальній сторінці)
 # =====================================================================
-# Сайт не приймає тип тижня в запиті і не підписує його всередині карток, тому розділяємо самі.
-# Слот = один заголовок <h3> ("N пара") у межах дня, під ним лежать контейнери пар:
-#   * 1 контейнер   -> пара щотижня                      (week = None)
-#   * 2 контейнери  -> ВЕРХНІЙ = чисельник ('chys'), НИЖНІЙ = знаменник ('znam')
-#   * 3+ контейнерів -> структура незрозуміла, тому не вгадуємо: пари вважаємо щотижневими
-# id (наприклад, "group_full") тип тижня НЕ визначає: сайт ставить його майже на кожну пару.
-# Клас week_color підсвічує контейнер, що відбувається ЗАРАЗ; він потрібен лише для фільтра "Поточний тиждень".
-# Позицію рахуємо ДО фільтра підгрупи, щоб пара не "перепливла" з верхньої половини на всю клітинку.
+# <div class="view-content">
+#   <span class="view-grouping-header">Пн</span>          <- день (div.view-grouping-обгортки може не бути)
+#   <h3>1</h3>                                             <- номер пари
+#   <div class="stud_schedule">
+#     <div class="views-row"><div id='group_znam' class='week_color'><div class='group_content'>...пара...</div></div></div>
+#     <div class="views-row"><div id='group_chys'><div class='group_content'>...пара...</div></div></div>
+#   </div>
+#
+# id контейнера каже ВСЕ: "хто" + "коли".
+#   хто:   group_...  = вся група          sub_1_... = підгрупа 1          sub_2_... = підгрупа 2
+#   коли:  ..._full   = щотижня            ..._chys  = чисельник           ..._znam  = знаменник
+# Приклади: group_full, group_chys, group_znam, sub_1_full, sub_2_full (sub_N_chys / sub_N_znam за тим же принципом).
+# Порядок у розмітці НЕ визначає тиждень: у слоті може першим стояти group_znam, а другим group_chys.
+# Клас week_color на контейнері = ця пара відбувається на ПОТОЧНОМУ тижні (у тому числі group_full).
+#
+# Якщо в контейнері немає жодного з маркерів (сторінка нестандартна), діє запасна логіка за позицією:
+#   * 2 рядки в слоті -> ВЕРХНІЙ = чисельник, НИЖНІЙ = знаменник; 1 рядок -> щотижня; 3+ -> не вгадуємо (щотижня).
+#   * Дві колонки поруч без id (float / width:50% / col-* / flex): перша = підгрупа 1, друга = підгрупа 2.
+#   * Підгрупа без структури: маркери "(1)" / "(2)" у тексті пари.
+# Позицію рахуємо ДО фільтра підгрупи (порожні контейнери теж рахуються).
 
 WEEK_COLOR_CLASS = "week_color"
 WEEK_FILTERS = ("chys", "znam", "cur")          # усе інше (None) = "Всі тижні"
 EMPTY_MSG = "📭 Для вибраних підгрупи та тижня пар не знайдено."
+
+SUB_RE = re.compile(r'(?<![a-z0-9])sub(?:group)?[_\-]?([12])(?![0-9])', re.IGNORECASE)
+FULL_ID_RE = re.compile(r'^group', re.IGNORECASE)          # id="group_full", "group_chys", ...
+WEEK_ID_RE = re.compile(r'(?<![a-z0-9])(chys|znam|full)(?![a-z0-9])', re.IGNORECASE)   # group_chys, sub_1_znam, sub_2_full ...
+COL_CLASS_RE = re.compile(r'(?<![a-z])(?:col|column|left|right|half|inline|float|cell|flex)(?![a-z])', re.IGNORECASE)
+COL_STYLE_RE = re.compile(r'float\s*:\s*(?:left|right)|display\s*:\s*(?:inline|table-cell|flex)', re.IGNORECASE)
+WIDTH_RE = re.compile(r'(?<![\w-])width\s*:\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)
+PARENT_COL_RE = re.compile(r'(?<![a-z])(?:flex|columns?|cols|grid|table)(?![a-z])|display\s*:\s*(?:flex|grid|table)', re.IGNORECASE)
 
 def _has_class(el, name):
     return name in (el.get('class') or [])
@@ -54,35 +74,120 @@ def _has_class(el, name):
 def _is_inside(node, container):
     return any(p is container for p in node.parents)
 
+def explicit_subgroup(el):
+    """'1' / '2', якщо id або class самого елемента містить sub_1 / sub_2 (sub-1, sub1, subgroup_2 ...), інакше None."""
+    for token in [el.get('id') or ''] + list(el.get('class') or []):
+        m = SUB_RE.search(token)
+        if m:
+            return m.group(1)
+    return None
+
+def explicit_week(unit, row):
+    """
+    'chys' | 'znam' | 'full' | None за id/class контейнера пари (group_chys, sub_1_znam, group_full ...).
+    Шукаємо на самому елементі, на обгортках усередині рядка та (якщо контейнер один) на нащадках.
+    None = сторінка не каже, який це тиждень.
+    """
+    def scan(el):
+        for token in [el.get('id') or ''] + list(el.get('class') or []):
+            m = WEEK_ID_RE.search(token)
+            if m:
+                return m.group(1).lower()
+        return None
+
+    node = unit
+    while node is not None and node is not row and getattr(node, 'name', None) not in (None, '[document]'):
+        found = scan(node)
+        if found:
+            return found
+        node = node.parent
+    for el in unit.find_all(True):
+        found = scan(el)
+        if found:
+            return found
+    return None
+
+def is_full_width(unit, row):
+    """True, якщо пара лежить у контейнері з id="group_..." (на всю ширину): сам елемент, предок у межах рядка або нащадок."""
+    node = unit
+    while node is not None and node is not row and getattr(node, 'name', None) not in (None, '[document]'):
+        if FULL_ID_RE.match(node.get('id') or ''):
+            return True
+        node = node.parent
+    return unit.find(id=FULL_ID_RE) is not None
+
+def _column_hint_own(el):
+    style = el.get('style') or ''
+    for m in WIDTH_RE.finditer(style):
+        if float(m.group(1)) < 100:
+            return True
+    if COL_STYLE_RE.search(style):
+        return True
+    classes = el.get('class') or []
+    if any(re.search(r'(?:^|[_\-])(?:12|full)$', c, re.IGNORECASE) for c in classes):
+        return False                       # col-12 / *_full: на всю ширину
+    return any(COL_CLASS_RE.search(c) or re.search(r'(?:^|[_\-])(?:col|span)[_\-]?[a-z]*[_\-]?\d', c, re.IGNORECASE) for c in classes)
+
+def _column_hint(el):
+    """Ознаки того, що блок стоїть у колонці (поруч з іншим), а не на всю ширину: на самому блоці або на його обгортці."""
+    return _column_hint_own(el) or (el.parent is not None and _column_hint_own(el.parent))
+
+def _parent_columns(el):
+    parent = el.parent
+    if parent is None:
+        return False
+    return bool(PARENT_COL_RE.search(parent.get('style') or '') or any(PARENT_COL_RE.search(c) for c in (parent.get('class') or [])))
+
 def lesson_units(row):
     """
-    Контейнери пар усередині одного рядка (.stud_schedule). Якщо рядок містить кілька блоків
-    (верхня/нижня половина), кожен береться окремо, навіть порожній, щоб не збилась позиція.
-    Якщо блок один, одиницею є сам рядок.
+    Контейнери пар усередині одного рядка (.stud_schedule) у порядку розмітки: [(елемент, підгрупа, джерело)].
+    Джерело підгрупи: 'id' (sub_1 / sub_2), 'column' (ліва/права колонка без id), 'full' (group_full, для обох), 'none' (невідомо).
+    Порожні контейнери теж повертаються, щоб позиція верх/низ і ліво/право не збивалась.
     """
-    contents = row.find_all('div', class_='group_content')
-    if len(contents) >= 2:
-        return contents
-    blocks = row.find_all('div', id=re.compile(r'^(sub)?group', re.IGNORECASE))
-    blocks = [b for b in blocks if not any(o is not b and _is_inside(b, o) for o in blocks)]  # лише зовнішні
-    if len(blocks) >= 2:
-        return blocks
-    return [row]
+    order = {id(el): i for i, el in enumerate(row.descendants)}
+    labeled = [el for el in row.find_all(True) if explicit_subgroup(el)]
+    labeled = [b for b in labeled if not any(o is not b and _is_inside(b, o) for o in labeled)]      # лише зовнішні
 
-def is_current_week(unit, all_units, boundary):
+    if labeled:
+        # решта пар у цьому ж рядку (наприклад, лекція на всю ширину): поза колонками підгруп і не є їх обгорткою
+        cands = row.find_all('div', class_='group_content') + row.find_all('div', id=FULL_ID_RE)
+        cands = [c for c in cands
+                 if not any(_is_inside(c, l) or l is c for l in labeled) and not any(_is_inside(l, c) for l in labeled)]
+        cands = [c for c in cands if not any(o is not c and _is_inside(c, o) for o in cands)]
+        units = [(el, explicit_subgroup(el), 'id') for el in labeled]
+        units += [(el, None, 'full' if is_full_width(el, row) else 'none') for el in cands]
+        units.sort(key=lambda u: order.get(id(u[0]), 0))
+        return units
+
+    base = row.find_all('div', class_='group_content')
+    if len(base) < 2:
+        blocks = row.find_all('div', id=re.compile(r'^(sub)?group', re.IGNORECASE))
+        blocks = [b for b in blocks if not any(o is not b and _is_inside(b, o) for o in blocks)]
+        base = blocks if len(blocks) >= 2 else [row]
+    units = [[el, None, 'full' if is_full_width(el, row) else 'none'] for el in base]
+
+    # Дві колонки поруч без id: перша = підгрупа 1, друга = підгрупа 2 (лише для блоків не з id="group_...")
+    if len(units) == 2 and all(u[2] != 'full' for u in units) and all(_column_hint(u[0]) or _parent_columns(u[0]) for u in units):
+        units[0][1], units[0][2] = '1', 'column'
+        units[1][1], units[1][2] = '2', 'column'
+    return [tuple(u) for u in units]
+
+def row_is_current(row_units, all_units, boundary):
     """
-    True, якщо контейнер підсвічений класом week_color: на ньому самому, всередині нього
-    або на обгортці, що містить лише цей контейнер (обгортка, спільна з іншими, нічого не означає).
+    True, якщо рядок підсвічений класом week_color: на самому контейнері, всередині нього або на обгортці,
+    що містить лише контейнери цього рядка (обгортка, спільна з іншими рядками, нічого не означає).
     """
-    if _has_class(unit, WEEK_COLOR_CLASS) or unit.find(class_=WEEK_COLOR_CLASS) is not None:
-        return True
-    for parent in unit.parents:
-        if parent is boundary or getattr(parent, 'name', None) in (None, '[document]'):
-            break
-        if any(u is not unit and _is_inside(u, parent) for u in all_units):
-            break
-        if _has_class(parent, WEEK_COLOR_CLASS):
+    others = [u for u in all_units if not any(u is r for r in row_units)]
+    for unit in row_units:
+        if _has_class(unit, WEEK_COLOR_CLASS) or unit.find(class_=WEEK_COLOR_CLASS) is not None:
             return True
+        for parent in unit.parents:
+            if parent is boundary or getattr(parent, 'name', None) in (None, '[document]'):
+                break
+            if any(_is_inside(o, parent) for o in others):
+                break
+            if _has_class(parent, WEEK_COLOR_CLASS):
+                return True
     return False
 
 def slot_number(unit):
@@ -93,18 +198,52 @@ def slot_number(unit):
     m = re.search(r'\d+', h3.get_text())
     return int(m.group()) if m else id(h3)
 
+def build_rows(slot_lessons):
+    """
+    Розкладає пари слота по горизонтальних смугах (у порядку розмітки). Пара "підгрупа 1" і пара "підгрупа 2" стають
+    в один рядок (колонки поруч); усе інше (пара на всю ширину, повтор тієї ж підгрупи) починає новий рядок.
+    """
+    rows = []
+    for l in slot_lessons:
+        cur = rows[-1] if rows else None
+        if (cur and l['sub'] in ('1', '2')
+                and all(x['sub'] in ('1', '2') for x in cur) and all(x['sub'] != l['sub'] for x in cur)):
+            cur.append(l)
+        else:
+            rows.append([l])
+    return rows
+
 def assign_week_types(lessons):
-    """Групує пари за (день, номер пари) і проставляє l['week'] = 'chys' | 'znam' | None (None = щотижня)."""
+    """
+    Проставляє l['week'] = 'chys' | 'znam' | None (None = щотижня) та l['current'].
+    Основне джерело: id пари (l['week_id']). Запасне (лише якщо в слоті жодна пара не має маркера тижня):
+    позиція рядків у слоті (day, номер пари): 2 рядки = верх чисельник / низ знаменник.
+    """
     slots = {}
     for l in lessons:
         slots.setdefault((l['day'], l['slot']), []).append(l)
     for group in slots.values():
-        if len(group) == 2:
-            group[0]['week'] = 'chys'      # верхній контейнер
-            group[1]['week'] = 'znam'      # нижній контейнер
-        else:
-            for l in group:
-                l['week'] = None           # один контейнер на всю клітинку (або незрозуміла структура)
+        rows = build_rows(group)
+        slot_has_ids = any(l['week_id'] for l in group)
+        for i, row in enumerate(rows):
+            row_cur = None
+            for l in row:
+                wid = l['week_id']
+                if wid in ('chys', 'znam'):
+                    l['week'] = wid
+                elif wid == 'full':
+                    l['week'] = None
+                elif not slot_has_ids and len(rows) == 2:
+                    l['week'] = 'chys' if i == 0 else 'znam'       # позиція: верхній / нижній рядок
+                else:
+                    l['week'] = None
+                if wid:
+                    # тиждень відомий з id -> підсвітка рахується для кожної пари окремо
+                    l['current'] = row_is_current([l['el']], l['all_units'], l['boundary'])
+                else:
+                    if row_cur is None:
+                        row_cur = row_is_current([x['el'] for x in row], l['all_units'], l['boundary'])
+                    l['current'] = row_cur
 
 def week_visible(lesson, week_filter):
     """Чи показувати пару при вибраному фільтрі. Пари "щотижня" (week is None) видно завжди."""
@@ -115,6 +254,44 @@ def week_visible(lesson, week_filter):
     if week_filter == 'cur':
         return lesson['current'] or lesson['week'] is None
     return True                            # "Всі тижні"
+
+def is_excluded_subgroup(text, current_subgroup):
+    """Запасний варіант, коли структура не каже, яка це підгрупа: шукаємо маркери "(2)", "підгр. 2" ... у тексті."""
+    if not current_subgroup: return False
+    ex_sub = str(3 - int(current_subgroup))
+    patterns = [rf"\({ex_sub}\)", rf"підгр\.\s*{ex_sub}", rf"{ex_sub}\s*п/г", rf"підгрупа\s*{ex_sub}"]
+    text_lower = text.lower()
+    for p in patterns:
+        if re.search(p, text_lower, re.IGNORECASE):
+            our_sub = str(current_subgroup)
+            if not re.search(rf"\({our_sub}\)", text_lower): return True
+    return False
+
+def subgroup_visible(lesson, subgroup):
+    """
+    Підгрупа 1: sub == "1" і sub is None. Підгрупа 2: sub == "2" і sub is None.
+    Порожня колонка чужої підгрупи не підставляє сусідню пару: пара з sub="1" ніколи не потрапить до підгрупи 2.
+    """
+    if not subgroup:
+        return True
+    if lesson['sub'] in ('1', '2'):
+        return lesson['sub'] == str(subgroup)
+    if lesson['sub_src'] == 'full':
+        return True                                     # id="group_full": для обох підгруп, текст не перевіряємо
+    return not is_excluded_subgroup(lesson['text'], subgroup)   # структури немає -> маркери в тексті
+
+def iter_schedule_rows(content_div):
+    """
+    (день, div.stud_schedule) у порядку розмітки. Працює і коли дні обгорнуті в div.view-grouping,
+    і коли (як зараз на сайті) заголовки днів та розклад лежать пласким списком в одному div.view-content.
+    """
+    day = None
+    for el in content_div.find_all(True):
+        classes = el.get('class') or []
+        if 'view-grouping-header' in classes:
+            day = get_standard_day_name(el.get_text(strip=True))
+        elif el.name == 'div' and 'stud_schedule' in classes and day:
+            yield day, el
 
 def _describe(el):
     if el is None:
@@ -182,63 +359,52 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
 
     schedule_data = {}
 
-    # --- Фільтр підгруп ---
-    def is_excluded_subgroup(text, current_subgroup):
-        if not current_subgroup: return False
-        ex_sub = str(3 - int(current_subgroup))
-        patterns = [rf"\({ex_sub}\)", rf"підгр\.\s*{ex_sub}", rf"{ex_sub}\s*п/г", rf"підгрупа\s*{ex_sub}"]
-        text_lower = text.lower()
-        for p in patterns:
-            if re.search(p, text_lower, re.IGNORECASE):
-                our_sub = str(current_subgroup)
-                if not re.search(rf"\({our_sub}\)", text_lower): return True
-        return False
-
     if week_filter not in WEEK_FILTERS:
         week_filter = None      # None = "Всі тижні"
 
     html_lessons = 0            # скільки пар знайдено в HTML-режимі (щоб не плутати "нема пар" з "нема розмітки")
 
     # === ВАРІАНТ 1: HTML ===
-    days = content_div.find_all('div', class_='view-grouping')
-    if days:
-        # Крок 1: збираємо всі контейнери пар (разом з порожніми половинами, щоб позиція верх/низ була точною)
+    schedule_rows = list(iter_schedule_rows(content_div))
+    if schedule_rows:
+        # Крок 1: збираємо всі контейнери пар (разом з порожніми, щоб позиція верх/низ і ліво/право була точною)
+        units = [(day_name, row, u, sub, src) for day_name, row in schedule_rows
+                 for (u, sub, src) in lesson_units(row)]
+        all_units = [u for _, _, u, _, _ in units]
         lessons = []
-        for day_block in days:
-            header = day_block.find('span', class_='view-grouping-header')
-            raw_day = header.get_text(strip=True) if header else ""
-            day_name = get_standard_day_name(raw_day)
-            if not day_name: continue
+        for day_name, row, unit, sub, src in units:
+            content = unit
+            if unit is row:
+                content = row.find('div', class_='group_content') or row
+            num_header = unit.find_previous('h3')
+            lessons.append({
+                'day': day_name,
+                'slot': slot_number(unit),
+                'num': num_header.get_text(strip=True) if num_header else "?",
+                'text': content.get_text(separator=" ", strip=True).strip(),
+                'el': unit, 'boundary': content_div, 'all_units': all_units,
+                'sub': sub,                            # "1" | "2" | None (None = для обох підгруп)
+                'sub_src': src,                        # id | column | full | none
+                'week_id': explicit_week(unit, row),   # chys | znam | full | None
+                'current': False,
+                'week': None,
+                'dbg': (_describe(unit), _describe(unit.parent)),
+            })
 
-            units = [(row, u) for row in day_block.find_all('div', class_='stud_schedule') for u in lesson_units(row)]
-            unit_els = [u for _, u in units]
-            for row, unit in units:
-                content = unit
-                if unit is row:
-                    content = row.find('div', class_='group_content') or row
-                num_header = unit.find_previous('h3')
-                lessons.append({
-                    'day': day_name,
-                    'slot': slot_number(unit),
-                    'num': num_header.get_text(strip=True) if num_header else "?",
-                    'text': content.get_text(separator=" ", strip=True).strip(),
-                    'current': is_current_week(unit, unit_els, day_block),
-                    'week': None,
-                    'dbg': (_describe(unit), _describe(unit.parent)),
-                })
-
-        # Крок 2: верх/низ по слотах, і лише потім підгрупа
+        # Крок 2: верх/низ по слотах (до фільтра підгрупи)
         assign_week_types(lessons)
         filled = [l for l in lessons if l['text']]
         html_lessons = len(filled)
-        visible = [l for l in filled if not is_excluded_subgroup(l['text'], subgroup)]
+        visible = [l for l in filled if subgroup_visible(l, subgroup)]
 
         # Діагностика (видно в логах хостингу)
-        logger.info("WEEKS group=%s filter=%s контейнерів=%s непорожніх=%s чис=%s знам=%s щотижня=%s week_color=%s структура=%s",
-                    group_name, week_filter, len(lessons), html_lessons,
+        logger.info("WEEKS group=%s filter=%s sub=%s контейнерів=%s непорожніх=%s чис=%s знам=%s щотижня=%s week_color=%s "
+                    "підгр1=%s підгр2=%s для_обох=%s джерела=%s id_тижня=%s структура=%s",
+                    group_name, week_filter, subgroup, len(lessons), html_lessons,
                     sum(l['week'] == 'chys' for l in filled), sum(l['week'] == 'znam' for l in filled),
                     sum(l['week'] is None for l in filled), sum(l['current'] for l in lessons),
-                    [l['dbg'] for l in lessons[:3]])
+                    sum(l['sub'] == '1' for l in filled), sum(l['sub'] == '2' for l in filled), sum(l['sub'] is None for l in filled),
+                    sorted({l['sub_src'] for l in lessons}), sorted({str(l['week_id']) for l in lessons}), [l['dbg'] for l in lessons[:3]])
 
         # Крок 3: фільтр тижня і текст по днях
         for l in visible:
@@ -247,7 +413,8 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
             if day not in schedule_data:
                 schedule_data[day] = f"📅 <b>{day}</b> ({html.escape(group_name)})\n\n"
             week_mark = " <i>(чис.)</i>" if l['week'] == 'chys' else (" <i>(знам.)</i>" if l['week'] == 'znam' else "")
-            schedule_data[day] += f"⏰ <b>{l['num']} пара</b>{week_mark}\n📖 {html.escape(l['text'])}\n──────────────\n"
+            sub_mark = f" <i>(підгр. {l['sub']})</i>" if l['sub'] in ('1', '2') else ""
+            schedule_data[day] += f"⏰ <b>{l['num']} пара</b>{week_mark}{sub_mark}\n📖 {html.escape(l['text'])}\n──────────────\n"
 
     # === ВАРІАНТ 2: Текст (Fallback) ===
     # Лише якщо в HTML пар не знайшлось взагалі. Якщо вони були, але фільтр (підгрупа/тиждень) усе сховав,
