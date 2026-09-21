@@ -33,26 +33,20 @@ def get_standard_day_name(line):
     return None
 
 # =====================================================================
-# ТИЖНІ: чисельник / знаменник (за позицією в клітинці розкладу)
+# ТИЖНІ: чисельник / знаменник / поточний (за позицією в слоті)
 # =====================================================================
-# Структура розкладу ЛП: кожна клітинка (слот "N пара") має верхню і нижню частини:
-#   * ВЕРХНЯ частина = чисельник (chys), НИЖНЯ = знаменник (znam);
-#   * пара на всю клітинку (без поділу) = щотижня (full).
-# Клас week_color - лише зелене підсвічування того, що відбувається зараз. Він НЕ визначає, чисельник це
-# чи знаменник, тому парсер працює і без нього (вихідні, канікули, оновлення сайту).
-#
-# Як визначаємо тип пари:
-#   1) явна позначка блоку в id/class: group_chys / group_znam / group_full, sub_1_chys ... (найнадійніше);
-#   2) інакше за позицією у слоті: 2 блоки = верх (чисельник) + низ (знаменник); 1 блок = щотижня.
-#      Якщо підсвічені ОБИДВА блоки - це не верх/низ, а дві пари одного тижня, тому щотижня.
-# Позицію визначаємо ДО фільтра підгрупи, щоб пара не "перепливла" з верхньої половини на всю клітинку.
+# Сайт не приймає тип тижня в запиті і не підписує його всередині карток, тому розділяємо самі.
+# Слот = один заголовок <h3> ("N пара") у межах дня, під ним лежать контейнери пар:
+#   * 1 контейнер   -> пара щотижня                      (week = None)
+#   * 2 контейнери  -> ВЕРХНІЙ = чисельник ('chys'), НИЖНІЙ = знаменник ('znam')
+#   * 3+ контейнерів -> структура незрозуміла, тому не вгадуємо: пари вважаємо щотижневими
+# id (наприклад, "group_full") тип тижня НЕ визначає: сайт ставить його майже на кожну пару.
+# Клас week_color підсвічує контейнер, що відбувається ЗАРАЗ; він потрібен лише для фільтра "Поточний тиждень".
+# Позицію рахуємо ДО фільтра підгрупи, щоб пара не "перепливла" з верхньої половини на всю клітинку.
 
 WEEK_COLOR_CLASS = "week_color"
-WEEK_FILTERS = ("chys", "znam")
+WEEK_FILTERS = ("chys", "znam", "cur")          # усе інше (None) = "Всі тижні"
 EMPTY_MSG = "📭 Для вибраних підгрупи та тижня пар не знайдено."
-
-_TYPE_ID_RE = re.compile(r'(?:^|[_\-])(chys|znam|full)$', re.IGNORECASE)
-_TYPE_CLASS_RE = re.compile(r'(?:^|[_\-])(chys|znam)$', re.IGNORECASE)
 
 def _has_class(el, name):
     return name in (el.get('class') or [])
@@ -60,26 +54,10 @@ def _has_class(el, name):
 def _is_inside(node, container):
     return any(p is container for p in node.parents)
 
-def _block_type(el):
-    """'chys' | 'znam' | 'full' | None за id/class блоку (group_chys, group_znam, group_full, sub_1_chys ...)."""
-    m = _TYPE_ID_RE.search(el.get('id') or '')
-    if m:
-        return m.group(1).lower()
-    for c in el.get('class') or []:
-        m = _TYPE_CLASS_RE.search(c)
-        if m:
-            return m.group(1).lower()
-    return None
-
-def typed_blocks(row):
-    """Зовнішні блоки рядка з явною позначкою типу тижня."""
-    cands = [el for el in [row, *row.find_all(True)] if _block_type(el)]
-    return [b for b in cands if not any(o is not b and _is_inside(b, o) for o in cands)]
-
 def lesson_units(row):
     """
-    Блоки пар всередині рядка, коли явних позначок немає. Розділена картка (верхня/нижня половина) - це
-    кілька блоків в одному рядку: беремо кожен окремо (навіть порожній, щоб не збилась позиція).
+    Контейнери пар усередині одного рядка (.stud_schedule). Якщо рядок містить кілька блоків
+    (верхня/нижня половина), кожен береться окремо, навіть порожній, щоб не збилась позиція.
     Якщо блок один, одиницею є сам рядок.
     """
     contents = row.find_all('div', class_='group_content')
@@ -93,8 +71,8 @@ def lesson_units(row):
 
 def is_current_week(unit, all_units, boundary):
     """
-    True, якщо блок підсвічений класом week_color: на самому блоці, всередині нього
-    або на обгортці, яка містить лише цей блок. Використовується тільки як підказка (див. assign_week_types).
+    True, якщо контейнер підсвічений класом week_color: на ньому самому, всередині нього
+    або на обгортці, що містить лише цей контейнер (обгортка, спільна з іншими, нічого не означає).
     """
     if _has_class(unit, WEEK_COLOR_CLASS) or unit.find(class_=WEEK_COLOR_CLASS) is not None:
         return True
@@ -107,30 +85,36 @@ def is_current_week(unit, all_units, boundary):
             return True
     return False
 
-def _slot_key(unit):
+def slot_number(unit):
+    """Номер пари з найближчого попереднього <h3> ("1 пара" -> 1). Без номера - ключ за самим тегом."""
     h3 = unit.find_previous('h3')
-    return id(h3) if h3 is not None else None
+    if h3 is None:
+        return None
+    m = re.search(r'\d+', h3.get_text())
+    return int(m.group()) if m else id(h3)
 
 def assign_week_types(lessons):
-    """Проставляє l['week'] = 'chys' | 'znam' | None (None = щотижня). Порожні половини теж враховуються."""
+    """Групує пари за (день, номер пари) і проставляє l['week'] = 'chys' | 'znam' | None (None = щотижня)."""
     slots = {}
     for l in lessons:
         slots.setdefault((l['day'], l['slot']), []).append(l)
     for group in slots.values():
-        if any(l['kind'] for l in group):                      # 1) явні позначки id/class
+        if len(group) == 2:
+            group[0]['week'] = 'chys'      # верхній контейнер
+            group[1]['week'] = 'znam'      # нижній контейнер
+        else:
             for l in group:
-                l['week'] = l['kind'] if l['kind'] in WEEK_FILTERS else None
-        elif len(group) == 2 and not (group[0]['current'] and group[1]['current']):
-            group[0]['week'], group[1]['week'] = 'chys', 'znam'   # 2) верх = чисельник, низ = знаменник
-        else:                                                    # на всю клітинку (або незрозуміло) = щотижня
-            for l in group:
-                l['week'] = None
+                l['week'] = None           # один контейнер на всю клітинку (або незрозуміла структура)
 
-def week_excluded(lesson_week, week_filter):
-    """Чи треба сховати пару при вибраному тижні (пари "щотижня" видно завжди)."""
-    if week_filter not in WEEK_FILTERS or not lesson_week:
-        return False
-    return lesson_week != week_filter
+def week_visible(lesson, week_filter):
+    """Чи показувати пару при вибраному фільтрі. Пари "щотижня" (week is None) видно завжди."""
+    if week_filter == 'chys':
+        return lesson['week'] in ('chys', None)
+    if week_filter == 'znam':
+        return lesson['week'] in ('znam', None)
+    if week_filter == 'cur':
+        return lesson['current'] or lesson['week'] is None
+    return True                            # "Всі тижні"
 
 def _describe(el):
     if el is None:
@@ -218,7 +202,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
     # === ВАРІАНТ 1: HTML ===
     days = content_div.find_all('div', class_='view-grouping')
     if days:
-        # Крок 1: збираємо всі блоки пар (разом з порожніми половинами, щоб позиція верх/низ була точною)
+        # Крок 1: збираємо всі контейнери пар (разом з порожніми половинами, щоб позиція верх/низ була точною)
         lessons = []
         for day_block in days:
             header = day_block.find('span', class_='view-grouping-header')
@@ -226,48 +210,39 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
             day_name = get_standard_day_name(raw_day)
             if not day_name: continue
 
-            units = []
-            for row in day_block.find_all('div', class_='stud_schedule'):
-                blocks = typed_blocks(row)
-                if blocks:
-                    units.extend((row, b, _block_type(b)) for b in blocks)
-                else:
-                    units.extend((row, u, None) for u in lesson_units(row))
-            unit_els = [u for _, u, _ in units]
-
-            for row, unit, kind in units:
+            units = [(row, u) for row in day_block.find_all('div', class_='stud_schedule') for u in lesson_units(row)]
+            unit_els = [u for _, u in units]
+            for row, unit in units:
                 content = unit
                 if unit is row:
                     content = row.find('div', class_='group_content') or row
                 num_header = unit.find_previous('h3')
                 lessons.append({
                     'day': day_name,
-                    'slot': _slot_key(unit),
+                    'slot': slot_number(unit),
                     'num': num_header.get_text(strip=True) if num_header else "?",
                     'text': content.get_text(separator=" ", strip=True).strip(),
-                    'kind': kind,
                     'current': is_current_week(unit, unit_els, day_block),
                     'week': None,
                     'dbg': (_describe(unit), _describe(unit.parent)),
                 })
 
-        # Крок 2: тип тижня за структурою клітинки, потім підгрупа
+        # Крок 2: верх/низ по слотах, і лише потім підгрупа
         assign_week_types(lessons)
         filled = [l for l in lessons if l['text']]
         html_lessons = len(filled)
         visible = [l for l in filled if not is_excluded_subgroup(l['text'], subgroup)]
 
         # Діагностика (видно в логах хостингу)
-        logger.info("WEEKS group=%s filter=%s блоків=%s непорожніх=%s режим=%s чис=%s знам=%s щотижня=%s week_color=%s структура=%s",
-                    group_name, week_filter, len(lessons), len(filled),
-                    'id/class' if any(l['kind'] for l in lessons) else 'позиція',
+        logger.info("WEEKS group=%s filter=%s контейнерів=%s непорожніх=%s чис=%s знам=%s щотижня=%s week_color=%s структура=%s",
+                    group_name, week_filter, len(lessons), html_lessons,
                     sum(l['week'] == 'chys' for l in filled), sum(l['week'] == 'znam' for l in filled),
                     sum(l['week'] is None for l in filled), sum(l['current'] for l in lessons),
                     [l['dbg'] for l in lessons[:3]])
 
-        # Крок 3: формуємо текст по днях
+        # Крок 3: фільтр тижня і текст по днях
         for l in visible:
-            if week_excluded(l['week'], week_filter): continue
+            if not week_visible(l, week_filter): continue
             day = l['day']
             if day not in schedule_data:
                 schedule_data[day] = f"📅 <b>{day}</b> ({html.escape(group_name)})\n\n"
@@ -278,13 +253,13 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
     # Лише якщо в HTML пар не знайшлось взагалі. Якщо вони були, але фільтр (підгрупа/тиждень) усе сховав,
     # запасний режим запускати не можна: він не вміє фільтрувати тижні й показав би зайве.
     if not schedule_data and not html_lessons:
-        # Текстовий режим: клітинок верх/низ тут немає, тому тижні розділити неможливо.
-        # Не переривамо роботу: показуємо розклад як є (це аварійний режим для нестандартної сторінки).
+        # Текстовий режим: контейнерів верх/низ тут немає, тож тижні розділити неможливо.
+        # Не переривамо роботу: показуємо розклад як є (аварійний режим для нестандартної сторінки).
         raw_text = content_div.get_text(separator="\n", strip=True)
         lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
         current_day = None
         temp_schedule = {}
-        
+
         day_pattern = re.compile(r'^(Понеділок|Вівторок|Середа|Четвер|П\'ятниця|Субота|Неділя|Пн|Вт|Ср|Чт|Пт|Сб|Нд)\b', re.IGNORECASE)
 
         for line in lines:
@@ -297,13 +272,13 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
                 if rem and re.match(r'^[1-8]', rem):
                      temp_schedule[current_day].append({'num': rem[0], 'text': rem[1:].strip()})
                 continue
-            
+
             if current_day and re.match(r'^[1-8][\.\)\s]?', line):
                 pair_num = line[0]
                 text = line[1:].strip(" .)")
                 temp_schedule[current_day].append({'num': pair_num, 'text': text})
                 continue
-            
+
             if current_day and current_day in temp_schedule and temp_schedule[current_day]:
                 temp_schedule[current_day][-1]['text'] += " " + line
 

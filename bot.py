@@ -142,10 +142,11 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_home(update, context)  # завжди повертаємо користувача до кнопок
     # у групових чатах на сторонні повідомлення не реагуємо
 
-# --- ТИЖНІ: чисельник / знаменник / всі ---
-# Парсер визначає тиждень за позицією в клітинці розкладу: верх = чисельник, низ = знаменник, на всю клітинку = щотижня.
-WEEK_LABELS = {"chys": "Чисельник", "znam": "Знаменник"}
-LEGACY_WEEKS = ("cur", "next")    # кнопки "Поточний/Наступний тиждень" з проміжної версії, що могли лишитися в чатах
+# --- ТИЖНІ: чисельник / знаменник / поточний / всі ---
+# Парсер визначає тиждень за позицією в слоті: 1 контейнер = щотижня, 2 контейнери = верх (чисельник) + низ (знаменник).
+# "Поточний тиждень" = контейнери, підсвічені сайтом (week_color), плюс пари, що йдуть щотижня.
+WEEK_LABELS = {"chys": "Чисельник", "znam": "Знаменник", "cur": "Поточний тиждень"}
+LEGACY_WEEKS = ("next",)          # кнопка "Наступний тиждень" з проміжної версії, що могла лишитися в чатах
 
 def week_label(week_raw):
     return WEEK_LABELS.get(week_raw, "Всі тижні")
@@ -160,6 +161,7 @@ def week_keyboard(sub_choice, group):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("numerator (Чисельник)", callback_data=f"week_chys_{sub_choice}_{group}")],
         [InlineKeyboardButton("denominator (Знаменник)", callback_data=f"week_znam_{sub_choice}_{group}")],
+        [InlineKeyboardButton("🟢 Поточний тиждень", callback_data=f"week_cur_{sub_choice}_{group}")],
         [InlineKeyboardButton("Всі тижні", callback_data=f"week_all_{sub_choice}_{group}")],
         [InlineKeyboardButton("🔙 Змінити підгрупу", callback_data=f"back_to_subs_{group}")],
     ])
