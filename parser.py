@@ -60,6 +60,18 @@ WEEK_COLOR_CLASS = "week_color"
 WEEK_FILTERS = ("chys", "znam", "cur")          # усе інше (None) = "Всі тижні"
 EMPTY_MSG = "📭 Для вибраних підгрупи та тижня пар не знайдено."
 
+# Стандартний розклад дзвінків ЛП (для відображення поруч з номером пари; на визначення тижня/підгрупи не впливає)
+BELL_TIMES = {
+    1: "08:30 – 10:05", 2: "10:20 – 11:55", 3: "12:10 – 13:45", 4: "14:15 – 15:50",
+    5: "16:00 – 17:35", 6: "17:40 – 19:15", 7: "19:20 – 20:55", 8: "21:00 – 22:35",
+}
+
+def lesson_link(container):
+    """Перше посилання (href) усередині контейнера пари, якщо є (Zoom / Google Meet / MS Teams / VNS тощо), інакше None."""
+    a = container.find('a', href=True)
+    href = a['href'].strip() if a else None
+    return href or None
+
 SUB_RE = re.compile(r'(?<![a-z0-9])sub(?:group)?[_\-]?([12])(?![0-9])', re.IGNORECASE)
 FULL_ID_RE = re.compile(r'^group', re.IGNORECASE)          # id="group_full", "group_chys", ...
 WEEK_ID_RE = re.compile(r'(?<![a-z0-9])(chys|znam|full)(?![a-z0-9])', re.IGNORECASE)   # group_chys, sub_1_znam, sub_2_full ...
@@ -382,6 +394,7 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
                 'slot': slot_number(unit),
                 'num': num_header.get_text(strip=True) if num_header else "?",
                 'text': content.get_text(separator=" ", strip=True).strip(),
+                'link': lesson_link(content),
                 'el': unit, 'boundary': content_div, 'all_units': all_units,
                 'sub': sub,                            # "1" | "2" | None (None = для обох підгруп)
                 'sub_src': src,                        # id | column | full | none
@@ -414,7 +427,10 @@ def fetch_schedule_dict(group_name, semester="1", duration="1", subgroup=None, w
                 schedule_data[day] = f"📅 <b>{day}</b> ({html.escape(group_name)})\n\n"
             week_mark = " <i>(чис.)</i>" if l['week'] == 'chys' else (" <i>(знам.)</i>" if l['week'] == 'znam' else "")
             sub_mark = f" <i>(підгр. {l['sub']})</i>" if l['sub'] in ('1', '2') else ""
-            schedule_data[day] += f"⏰ <b>{l['num']} пара</b>{week_mark}{sub_mark}\n📖 {html.escape(l['text'])}\n──────────────\n"
+            time_part = f" ({BELL_TIMES[l['slot']]})" if l['slot'] in BELL_TIMES else ""
+            link_line = f"🔗 <a href=\"{html.escape(l['link'], quote=True)}\">Приєднатися до пари</a>\n" if l['link'] else ""
+            schedule_data[day] += (f"⏰ <b>{l['num']} пара{time_part}</b>{week_mark}{sub_mark}\n"
+                                    f"📖 {html.escape(l['text'])}\n{link_line}──────────────\n")
 
     # === ВАРІАНТ 2: Текст (Fallback) ===
     # Лише якщо в HTML пар не знайшлось взагалі. Якщо вони були, але фільтр (підгрупа/тиждень) усе сховав,
